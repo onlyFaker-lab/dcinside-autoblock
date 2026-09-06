@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "디시 자동 갱신차단",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "description": "차단이 만료된 악성 유저를 감지해 31일 재차단합니다. 마이너 갤러리 매니저·부매니저용.",
   "permissions": [
     "storage",

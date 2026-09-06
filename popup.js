@@ -142,21 +142,56 @@ function render() {
   // 명단 채우기
   const sb = $("scanBody");
   const SCAN_LIMIT = 300;
-  sb.innerHTML = state.imports.slice(0, SCAN_LIMIT).map((it) => `
+
+  // 불러온 사람들에게 실제로 붙어 있는 사유만 칩으로 만든다.
+  const counts = new Map();
+  for (const it of state.imports) {
+    const r = reasonOf(it);
+    counts.set(r, (counts.get(r) || 0) + 1);
+  }
+  const allReasons = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
+
+  // 다시 불러오면서 사라진 사유는 필터에서 지운다.
+  if (scanReasons) {
+    for (const r of [...scanReasons]) if (!counts.has(r)) scanReasons.delete(r);
+  }
+  if (state.imports.length === 0) scanReasons = null;
+
+  const on = (r) => !scanReasons || scanReasons.has(r);
+  $("scanFilter").innerHTML = allReasons.length === 0 ? "" :
+    `<span class="chiplabel">사유</span>` + allReasons.map((r) => `
+      <label class="chip${on(r) ? " on" : ""}">
+        <input type="checkbox" class="rchk" data-reason="${esc(r)}"${on(r) ? " checked" : ""}>
+        ${esc(r)} <b>${counts.get(r)}</b>
+      </label>`).join("") +
+      (scanReasons ? `<button id="btnReasonAll" class="linkbtn">전체</button>` : "");
+  $("scanFilter").classList.toggle("hidden", allReasons.length < 2);
+
+  const scanShown = visibleImports();
+  sb.innerHTML = scanShown.slice(0, SCAN_LIMIT).map((it) => `
     <tr>
-      <td><input type="checkbox" class="scanchk" data-code="${esc(it.code)}" checked></td>
+      <td><input type="checkbox" class="scanchk" data-code="${esc(it.code)}"${scanUnchecked.has(it.code) ? "" : " checked"}></td>
       <td>${esc(it.nick)}</td>
       <td>${esc(it.code)}</td>
       <td>${esc(it.reason)}</td>
       <td class="muted">${esc(it.date)} ${esc(it.time)}</td>
       <td class="${it.released ? "muted" : "ok"}">${it.released ? "해제됨" : "차단 중"}</td>
     </tr>`).join("");
-  $("scanEmpty").classList.toggle("hidden", state.imports.length > 0);
-  if (state.imports.length > SCAN_LIMIT) {
+  $("scanEmpty").textContent = state.imports.length === 0
+    ? "아직 불러오지 않았습니다."
+    : "고른 사유에 해당하는 사람이 없습니다. 위에서 사유를 골라주세요.";
+  $("scanEmpty").classList.toggle("hidden", scanShown.length > 0);
+  if (scanShown.length > SCAN_LIMIT) {
     sb.insertAdjacentHTML("beforeend",
-      `<tr><td colspan="6" class="muted">${state.imports.length}명 중 ${SCAN_LIMIT}명만 표시합니다. 추가하면 나머지가 이어서 나옵니다.</td></tr>`);
+      `<tr><td colspan="6" class="muted">${scanShown.length}명 중 ${SCAN_LIMIT}명만 표시합니다. 추가하면 나머지가 이어서 나옵니다.</td></tr>`);
   }
   $("scanActions").classList.toggle("hidden", state.imports.length === 0);
+
+  const picked = scanShown.slice(0, SCAN_LIMIT).filter((it) => !scanUnchecked.has(it.code)).length;
+  $("scanCount").textContent = scanReasons
+    ? `전체 ${state.imports.length}명 중 ${scanShown.length}명 표시, ${picked}명 선택`
+    : `${scanShown.length}명 중 ${picked}명 선택`;
+  $("btnScanAdd").disabled = picked === 0;
 
   // 이력
   const hb = $("histBody");
@@ -290,31 +325,91 @@ $("manualBody").addEventListener("click", async (e) => {
   render();
 });
 
+// 명단 채우기 화면의 사유 필터 상태.
+// scanReasons 가 null 이면 전체, 비어 있지 않은 Set 이면 그 사유만 보여준다.
+// scanUnchecked 는 사용자가 손으로 푼 체크를 필터를 바꿔도 기억하기 위한 것이다.
+let scanReasons = null;
+const scanUnchecked = new Set();
+const NO_REASON = "(사유 없음)";
+const reasonOf = (it) => it.reason || NO_REASON;
+
+// scanReasons 가 null 이면 전체. Set 이면 그 사유만.
+// 빈 Set 을 전체로 되돌리지 않는 것이 중요하다. 그러면 사용자는 아무것도
+// 안 고른 줄 아는데 화면에는 전원이 떠서, 그대로 추가하면 엉뚱한 사람이 들어간다.
+function visibleImports() {
+  if (!scanReasons) return state.imports;
+  return state.imports.filter((it) => scanReasons.has(reasonOf(it)));
+}
+
 $("btnScan").addEventListener("click", () => {
   const pages = Math.max(1, Math.min(100, Number($("scanPages").value) || 10));
   chrome.runtime.sendMessage({ type: "scan", pages });
 });
 
+// 화면을 다시 그리면 체크박스가 새로 만들어지므로 개별 요소가 아니라
+// 컨테이너에 한 번만 걸어둔다.
+$("scanFilter").addEventListener("change", (e) => {
+  const box = e.target.closest(".rchk");
+  if (!box) return;
+  // 화면의 체크 상태를 훑지 않고 지금 상태에서 하나만 더하거나 뺀다.
+  // render() 가 체크박스를 새로 만들기 때문에, 화면을 읽으면 방금 교체된
+  // 요소를 보게 되는 경우가 생긴다.
+  const all = [...document.querySelectorAll(".rchk")].map((c) => c.dataset.reason);
+  const cur = new Set(scanReasons ? [...scanReasons] : all);
+  if (box.checked) cur.add(box.dataset.reason);
+  else cur.delete(box.dataset.reason);
+  // 전부 켜져 있으면 필터를 끈 것과 같다. 하나도 안 켰으면 빈 Set 그대로 둔다.
+  scanReasons = cur.size === all.length ? null : cur;
+  render();
+});
+
+$("scanFilter").addEventListener("click", (e) => {
+  if (!e.target.closest("#btnReasonAll")) return;
+  scanReasons = null;
+  render();
+});
+
+$("scanBody").addEventListener("change", (e) => {
+  const box = e.target.closest(".scanchk");
+  if (!box) return;
+  if (box.checked) scanUnchecked.delete(box.dataset.code);
+  else scanUnchecked.add(box.dataset.code);
+  render();
+});
+
+// 보이는 사람에게만 적용한다. 사유로 추린 뒤 그 사람들만 담을 수 있게 하려는 것이다.
 function setAllScan(checked) {
-  document.querySelectorAll(".scanchk").forEach((c) => (c.checked = checked));
+  for (const it of visibleImports()) {
+    if (checked) scanUnchecked.delete(it.code);
+    else scanUnchecked.add(it.code);
+  }
+  render();
 }
 $("btnScanAll").addEventListener("click", () => setAllScan(true));
 $("btnScanNone").addEventListener("click", () => setAllScan(false));
 
 $("btnScanAdd").addEventListener("click", async () => {
-  const picked = [...document.querySelectorAll(".scanchk")]
-    .filter((c) => c.checked)
-    .map((c) => c.dataset.code);
+  // 화면에 그려진 사람만 대상으로 삼는다. 사유로 걸러 감춰둔 사람이
+  // 딸려 들어가면 사유를 고른 의미가 없다.
+  const pickedSet = new Set(
+    [...document.querySelectorAll(".scanchk")].filter((c) => c.checked).map((c) => c.dataset.code)
+  );
+  const picked = [...pickedSet];
   if (!picked.length) {
     alert("추가할 사람을 선택해주세요.");
     return;
   }
-  if (!confirm(`${picked.length}명을 명단에 추가합니다.\n\n앞으로 이 사람들의 차단이 풀리면 재차단 후보로 올라옵니다.`)) return;
+  const byReason = new Map();
+  for (const it of state.imports) {
+    if (pickedSet.has(it.code)) byReason.set(reasonOf(it), (byReason.get(reasonOf(it)) || 0) + 1);
+  }
+  const detail = [...byReason.entries()].map(([r, n]) => `  ${r} ${n}명`).join("\n");
+  if (!confirm(`${picked.length}명을 명단에 추가합니다.\n\n${detail}\n\n앞으로 이 사람들의 차단이 풀리면 재차단 후보로 올라옵니다.`)) return;
 
   const known = new Set(state.watchlist.map((t) => t.value));
   let added = 0;
   for (const it of state.imports) {
-    if (!picked.includes(it.code) || known.has(it.code)) continue;
+    if (!pickedSet.has(it.code) || known.has(it.code)) continue;
     state.watchlist.push({
       kind: "code",
       value: it.code,
@@ -325,7 +420,8 @@ $("btnScanAdd").addEventListener("click", async () => {
     known.add(it.code);
     added++;
   }
-  state.imports = state.imports.filter((it) => !picked.includes(it.code));
+  state.imports = state.imports.filter((it) => !pickedSet.has(it.code));
+  for (const code of picked) scanUnchecked.delete(code);
   await chrome.storage.local.set({ watchlist: state.watchlist, imports: state.imports });
   render();
   alert(`${added}명을 명단에 추가했습니다.`);

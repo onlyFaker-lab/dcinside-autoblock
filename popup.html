@@ -96,11 +96,15 @@
     <p class="muted small">
       차단 목록에서 31일 차단을 최근 것부터 모아옵니다. 이미 명단에 있는 사람과
       IP 차단은 빼고 보여줍니다. 재차단 사유는 원래 걸었던 사유를 그대로 씁니다.
+      불러온 뒤 사유를 골라 그 사유로 차단했던 사람만 추릴 수 있습니다.
     </p>
 
+    <div id="scanFilter" class="chiprow hidden"></div>
+
     <div id="scanActions" class="addrow hidden">
-      <button id="btnScanAll" class="linkbtn">전체 선택</button>
+      <button id="btnScanAll" class="linkbtn">보이는 사람 전체 선택</button>
       <button id="btnScanNone" class="linkbtn">전체 해제</button>
+      <span id="scanCount" class="muted small"></span>
       <button id="btnScanAdd" class="primary">선택한 사람 명단에 추가</button>
     </div>
 

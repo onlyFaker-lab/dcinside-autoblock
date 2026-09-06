@@ -1,8 +1,28 @@
+# 개인 정보가 담긴 파일 — 절대 커밋하지 말 것
 secrets.json
+*.secret.json
+
+# 실행 중 생기는 파일
+block_log.json
+gui.log
+gui.log.1
 *.log
+
+# 파이썬
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# 조사·진단용 임시 산출물
 out/
+out2/
+out3/
+
+# 배포용 압축 (릴리즈로 올리므로 저장소에는 두지 않음)
 *.zip
+
+# OS
 .DS_Store
 Thumbs.db
+desktop.ini

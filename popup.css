@@ -152,3 +152,30 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 label.inline { display: inline-flex; align-items: center; gap: 5px; }
 label.inline input { margin: 0; }
 input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+
+/* 명단 채우기 사유 필터 */
+.chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.chiprow .chiplabel { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.chip input { margin: 0; }
+.chip.on { border-color: var(--accent); color: var(--text); }
+.chip b { font-weight: 600; color: var(--muted); }
+.chip.on b { color: var(--accent-hover); }
