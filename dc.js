@@ -90,43 +90,85 @@ function parseNikCell(cellHtml) {
   return makeIdentity(hasIpTag ? KIND.CODE_IP : KIND.CODE, value, nick);
 }
 
-export function parseBlockList(html) {
-  const tableMatch = html.match(
-    /<table class="minor_block_list"[\s\S]*?<\/table>/i
+// class 속성은 값 하나만 있다고 보지 않는다. 디시가 class="blocknum on" 처럼
+// 뭘 하나 더 붙이거나 속성 순서를 바꿔도 견디게 한다.
+const RE_ROW_MARK = /class="[^"]*\bblocknum\b/i;
+const RE_ROW_MARK_G = /class="[^"]*\bblocknum\b/gi;
+
+// 기간·사유는 값을 그대로 비교(HOURS_BY_LABEL, REASON_VALUES)하는 데 쓰인다.
+// 셀 안에 뭐가 더 붙어도 아는 값으로 떨어지게 뽑는다.
+function parseDuration(cellHtml) {
+  const text = stripTags(cellHtml);
+  const m = text.match(/(\d+)\s*(시간|일)/);
+  return m ? `${m[1]}${m[2]}` : text;
+}
+
+function parseReason(cellHtml) {
+  const text = stripTags(cellHtml);
+  for (const known of Object.keys(REASON_VALUES)) {
+    if (text.includes(known)) return known;
+  }
+  return text;
+}
+
+function cell(tr, className) {
+  const re = new RegExp(
+    `<td[^>]*class="[^"]*\\b${className}\\b[^"]*"[^>]*>([\\s\\S]*?)</td>`, "i"
   );
-  if (!tableMatch) return [];
+  return (tr.match(re) || [])[1] || "";
+}
 
-  const body = tableMatch[0].split(/<tbody[^>]*>/i)[1] || "";
+// parseBlockList는 배열을 돌려주되, 표에 있던 행 수(expectedRows)와
+// 그중 못 읽은 수(missedRows)를 같이 달아 보낸다.
+//
+// 이게 필요한 이유: 마크업이 바뀌어 한 행도 못 읽으면 결과는 그냥 빈 배열이고,
+// 호출부는 "이력 없음"으로 읽는다. 아무도 안 막히는데 화면은 조용하다.
+// 빈 결과 자체는 정상일 수 있으므로(이력 없는 코드 검색) 행 표시 개수와
+// 실제 파싱 수를 대조해야 구분이 된다.
+export function parseBlockList(html) {
   const rows = [];
+  const meta = (found, expected) => {
+    rows.tableFound = found;
+    rows.expectedRows = expected;
+    rows.missedRows = Math.max(0, expected - rows.length);
+    return rows;
+  };
 
-  for (const trMatch of body.matchAll(/<tr>([\s\S]*?)<\/tr>/gi)) {
+  const tableMatch = html.match(
+    /<table[^>]*class="[^"]*\bminor_block_list\b[^"]*"[\s\S]*?<\/table>/i
+  );
+  if (!tableMatch) return meta(false, 0);
+
+  const table = tableMatch[0];
+  // tbody가 없는 마크업이 와도 표 전체를 훑어서 건진다.
+  const body = table.split(/<tbody[^>]*>/i)[1] || table;
+  const expected = (body.match(RE_ROW_MARK_G) || []).length;
+
+  for (const trMatch of body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
     const tr = trMatch[1];
-    if (!/class="blocknum"/.test(tr)) continue;
+    if (!RE_ROW_MARK.test(tr)) continue;
 
-    const dataNum = pick(tr, /class="blocknum"\s+data-num="(\d+)"/);
-    const num = pick(tr, /class="blocknum"[^>]*>([^<]*)</);
+    const dataNum = pick(tr, /class="[^"]*\bblocknum\b[^"]*"[^>]*\sdata-num="(\d+)"/i);
+    const num = pick(tr, /class="[^"]*\bblocknum\b[^"]*"[^>]*>([^<]*)</i);
 
-    const nikCell = (tr.match(/<td class="blocknik"[^>]*>([\s\S]*?)<\/td>/i) || [])[1] || "";
-    const identity = parseNikCell(nikCell);
-
-    const stateCell = (tr.match(/<td class="blockstate[^"]*"[^>]*>([\s\S]*?)<\/td>/i) || [])[1] || "";
-    const stateText = stripTags(stateCell);
+    const identity = parseNikCell(cell(tr, "blocknik"));
+    const stateText = stripTags(cell(tr, "blockstate"));
 
     rows.push({
       num,
       dataNum,
       identity,
-      reason: pick(tr, /<td class="blockreason"[^>]*>([^<]*)</i),
-      duration: pick(tr, /<td class="blocktime"[^>]*>([^<]*)</i),
-      date: pick(tr, /class="block_date"[^>]*>([^<]*)</i),
+      reason: parseReason(cell(tr, "blockreason")),
+      duration: parseDuration(cell(tr, "blocktime")),
+      date: pick(tr, /class="[^"]*\bblock_date\b[^"]*"[^>]*>([^<]*)</i),
       // 처리 시각은 숨겨진 툴팁 안에 있다
-      time: pick(tr, /class="block_time"[^>]*>\s*처리 시간\s*:\s*([^<]*)</i),
-      handler: pick(tr, /class="block_conduct"[^>]*>\s*처리자\s*:\s*([^<]*)</i),
+      time: pick(tr, /class="[^"]*\bblock_time\b[^"]*"[^>]*>\s*처리 시간\s*:\s*([^<]*)</i),
+      handler: pick(tr, /class="[^"]*\bblock_conduct\b[^"]*"[^>]*>\s*처리자\s*:\s*([^<]*)</i),
       stateText,
       released: stateText.includes("해제됨"),
     });
   }
-  return rows;
+  return meta(true, expected);
 }
 
 // --------------------------------------------------------------- 통신
@@ -251,7 +293,7 @@ async function crawlList(galleryId, maxPages, onPage) {
 
 // 차단 목록에서 특정 기간으로 '지금 차단 중'인 코드를 모은다.
 // 방금 건 차단은 목록 맨 위에 오므로, 한 명씩 검색하는 것보다 요청이 훨씬 적다.
-async function fetchRecentlyBlocked(galleryId, durationLabel, maxPages = 4) {
+async function fetchRecentlyBlocked(galleryId, durationLabel, maxPages) {
   const found = new Set();
   await crawlList(galleryId, maxPages, (rows) => {
     for (const r of rows) {
@@ -332,14 +374,22 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
   const want = labelForHours(hours);
   await new Promise((r) => setTimeout(r, 1000));
 
-  const blocked = await fetchRecentlyBlocked(galleryId, want);
+  // 방금 건 차단은 목록 위쪽에 몰려 있지만, 인원이 많으면 여러 페이지로 밀린다.
+  // 4페이지 고정이면 뒤로 밀린 사람이 멀쩡히 걸렸는데도 '실패'로 찍힌다.
+  // 인원에 맞춰 페이지를 늘린다. (한 페이지 약 15행으로 잡고 여유 2페이지)
+  const listPages = Math.min(20, Math.max(4, Math.ceil(codes.length / 15) + 2));
+
+  const blocked = await fetchRecentlyBlocked(galleryId, want, listPages);
   const verified = codes.filter((c) => blocked.has(c));
   let failed = codes.filter((c) => !blocked.has(c));
 
-  // 목록 앞쪽에서 못 찾은 것만 개별 검색으로 한 번 더 본다.
-  // 여기서 다 뒤지면 인원이 많을 때 요청이 폭증하므로 상한을 둔다.
-  const RECHECK_LIMIT = 20;
-  if (failed.length && failed.length <= RECHECK_LIMIT) {
+  // 목록에서 못 찾은 사람은 전원 개별 검색으로 한 번 더 본다.
+  // 상한을 두면 그 위로는 확인 없이 실패 처리돼 이력이 거짓말을 하게 된다.
+  // 어차피 후보는 maxPerRun으로 막혀 있어 요청이 폭증하지 않는다.
+  if (failed.length) {
+    if (onProgress) {
+      onProgress(`  목록에서 못 찾은 ${failed.length}건을 개별 확인합니다`);
+    }
     const still = [];
     for (const code of failed) {
       try {
@@ -353,6 +403,7 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
       } catch {
         still.push(code);
       }
+      await new Promise((r) => setTimeout(r, 400));
     }
     failed = still;
   }

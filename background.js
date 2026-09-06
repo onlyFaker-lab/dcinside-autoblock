@@ -15,6 +15,17 @@ const DEFAULTS = {
   notify: true,
 };
 
+// MV3 서비스워커는 작업 도중에도 종료될 수 있다. 그러면 busy가 true인 채 남아
+// 이후 알람 틱이 전부 되돌아가고 팝업 버튼도 굳는다. 확장이 조용히 멈추는 것이다.
+// 그래서 시작 시각을 같이 적어두고, 이 시간을 넘긴 잠금은 없는 것으로 본다.
+// (300명 조회가 400ms 간격이라 2분대. 30분이면 정상 작업이 걸릴 일은 없다)
+const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
+
+function isBusy(status, now = Date.now()) {
+  if (!status || !status.busy) return false;
+  return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
+}
+
 async function getState() {
   const s = await chrome.storage.local.get(null);
   return {
@@ -24,14 +35,16 @@ async function getState() {
     manual: s.manual || [],
     imports: s.imports || [],
     history: s.history || [],
-    status: s.status || { text: "대기 중", busy: false },
+    status: s.status || { text: "대기 중", busy: false, busySince: 0 },
     lastCheck: s.lastCheck || null,
     ranToday: s.ranToday || [],
   };
 }
 
 async function setStatus(text, busy) {
-  await chrome.storage.local.set({ status: { text, busy } });
+  await chrome.storage.local.set({
+    status: { text, busy, busySince: busy ? Date.now() : 0 },
+  });
 }
 
 async function log(message) {
@@ -95,7 +108,9 @@ async function runCheck({ auto = false } = {}) {
   // 예약해둔 만료 시각이 실제와 어긋날 수 있다. 완장이 손으로 풀어줬다면
   // 우리는 31일 내내 모르고 지나간다. 그래서 남는 여유만큼 오래 확인 안 한
   // 사람을 몇 명씩 섞어서 본다. 어긋난 기록이 저절로 바로잡힌다.
-  const sweepMax = Math.max(0, Number(settings.sweepPerRun) ?? 20);
+  // Number(undefined)는 NaN이고 NaN ?? 20 은 NaN이다. ??로는 안 걸러진다.
+  const sweepRaw = Number(settings.sweepPerRun);
+  const sweepMax = Number.isFinite(sweepRaw) ? Math.max(0, sweepRaw) : 20;
   const dueSet = new Set(due.map((t) => t.value));
   const sweep = enabled
     .filter((t) => !dueSet.has(t.value))
@@ -130,6 +145,7 @@ async function runCheck({ auto = false } = {}) {
   const manual = [];
   const updates = new Map();     // code → 갱신할 값
   let retired = 0;
+  let parseFailures = 0;
 
   try {
     for (let i = 0; i < targets.length; i++) {
@@ -140,6 +156,16 @@ async function runCheck({ auto = false } = {}) {
       const unparsed = rows.filter((r) => !r.identity).length;
       if (unparsed) {
         await log(`  [경고] ${entry.value}: ${unparsed}개 행의 식별자를 읽지 못했습니다.`);
+      }
+      // 표에는 행이 있는데 우리가 못 읽은 경우. 마크업이 바뀌면 여기가 먼저 운다.
+      // 이걸 안 보면 "이력 없음"으로 조용히 넘어가고, 아무도 안 막힌 채
+      // 60일 뒤 명단이 자동 중지된다.
+      if (rows.missedRows) {
+        parseFailures++;
+        await log(
+          `  [경고] ${entry.value}: 표에 ${rows.expectedRows}행이 있는데 ` +
+          `${rows.length}행만 읽었습니다. 디시 화면 구조가 바뀐 것 같습니다.`
+        );
       }
 
       const upd = { nextCheckAt: result.nextCheckAt, lastVerifiedAt: now };
@@ -186,6 +212,16 @@ async function runCheck({ auto = false } = {}) {
   await saveWatchlistUpdates(updates);
   await chrome.storage.local.set({ candidates, manual, lastCheck: now });
 
+  if (parseFailures) {
+    await log(
+      `[경고] ${parseFailures}명의 조회에서 표를 제대로 읽지 못했습니다. ` +
+      `판정 결과를 믿지 마시고, 관리 화면에서 직접 확인해 주세요.`
+    );
+    notify(
+      "차단 목록을 읽지 못했습니다",
+      `${parseFailures}건에서 표 구조가 예상과 다릅니다. 결과를 믿지 마세요.`
+    );
+  }
   if (retired) {
     await log(`[안내] ${retired}명은 60일간 기록이 없어 자동으로 중지했습니다.`);
   }
@@ -208,9 +244,9 @@ async function runCheck({ auto = false } = {}) {
     }
   } else {
     await log("재차단할 대상이 없습니다.");
-    await setStatus("이상 없음", false);
+    await setStatus(parseFailures ? "경고 — 목록을 읽지 못함" : "이상 없음", false);
   }
-  return { ok: true, candidates };
+  return { ok: true, candidates, parseFailures };
 }
 
 // --------------------------------------------------------------- 실행
@@ -334,21 +370,41 @@ async function runScan(pages = 10) {
 
 // --------------------------------------------------------------- 스케줄
 
+// 예정 시각 비교는 로컬 시간(setHours)으로 한다. 그러니 '오늘' 키도 로컬이어야
+// 한다. toISOString은 UTC라 KST에서 09:00 이전 확인 시각을 넣으면 날짜가 어긋난다.
+function localDateKey(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 브라우저가 꺼졌다 켜졌으면 진행 중이던 작업은 이미 죽은 것이다. 잠금을 푼다.
+async function clearStaleLock() {
+  const { status } = await chrome.storage.local.get("status");
+  if (status && status.busy) {
+    await chrome.storage.local.set({
+      status: { text: "대기 중", busy: false, busySince: 0 },
+    });
+    await log("[안내] 끝나지 않은 채 남아 있던 작업 표시를 풀었습니다.");
+  }
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("tick", { periodInMinutes: 15 });
 });
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   chrome.alarms.create("tick", { periodInMinutes: 15 });
+  await clearStaleLock();
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== "tick") return;
 
   const { settings, status, ranToday } = await getState();
-  if (status.busy) return;
+  if (isBusy(status)) return;
+  if (status.busy) await clearStaleLock();   // 시간이 지난 잠금은 풀고 진행한다
 
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
+  const today = localDateKey(now);
   const keep = ranToday.filter((k) => k.startsWith(today));
 
   for (const t of settings.checkTimes) {
@@ -377,6 +433,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
+      // 이미 돌고 있는데 또 누르면 같은 작업이 겹친다. 다만 굳은 잠금은 풀어준다.
+      const { status } = await chrome.storage.local.get("status");
+      if (isBusy(status)) {
+        sendResponse({ ok: false, error: "작업이 진행 중입니다. 끝나면 다시 눌러주세요." });
+        return;
+      }
+      if (status && status.busy) await clearStaleLock();
+
       if (msg.type === "check") sendResponse(await runCheck({ auto: false }));
       else if (msg.type === "apply") sendResponse(await runApply());
       else if (msg.type === "scan") sendResponse(await runScan(msg.pages));

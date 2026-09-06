@@ -14,6 +14,15 @@ const DEFAULTS = {
 
 let state = {};
 
+// background.js와 같은 규칙. 서비스워커가 작업 도중 죽으면 busy가 true로 남는데,
+// 그대로 믿으면 버튼이 영영 disabled로 굳는다. 30분 넘은 잠금은 무시한다.
+const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
+
+function isBusy(status, now = Date.now()) {
+  if (!status || !status.busy) return false;
+  return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
+}
+
 async function load() {
   const s = await chrome.storage.local.get(null);
   state = {
@@ -24,7 +33,7 @@ async function load() {
     imports: s.imports || [],
     history: s.history || [],
     logs: s.logs || [],
-    status: s.status || { text: "대기 중", busy: false },
+    status: s.status || { text: "대기 중", busy: false, busySince: 0 },
   };
   render();
 }
@@ -64,8 +73,9 @@ function nextCheckText() {
 function render() {
   $("statusText").textContent = state.status.text;
   $("nextCheck").textContent = nextCheckText();
-  $("btnCheck").disabled = state.status.busy;
-  $("btnApply").disabled = state.status.busy || state.candidates.length === 0;
+  const busy = isBusy(state.status);
+  $("btnCheck").disabled = busy;
+  $("btnApply").disabled = busy || state.candidates.length === 0;
 
   // 후보
   const cb = $("candBody");
@@ -163,6 +173,8 @@ function render() {
   $("cfgGallery").value = state.settings.galleryId;
   $("cfgTimes").value = state.settings.checkTimes.join(", ");
   $("cfgMax").value = state.settings.maxPerRun;
+  $("cfgChecks").value = state.settings.maxChecksPerRun;
+  $("cfgSweep").value = state.settings.sweepPerRun;
   $("cfgAuto").checked = !!state.settings.autoApply;
   $("cfgNotify").checked = state.settings.notify !== false;
 }
@@ -249,10 +261,15 @@ $("btnSave").addEventListener("click", async () => {
     return;
   }
 
+  // 기존 설정을 통째로 갈아엎으면 화면에 없는 항목(maxChecksPerRun, sweepPerRun)이
+  // 저장할 때마다 지워진다. 남겨두고 바뀐 것만 덮어쓴다.
   state.settings = {
+    ...state.settings,
     galleryId: $("cfgGallery").value.trim(),
     checkTimes: times,
     maxPerRun: Math.max(1, Number($("cfgMax").value) || 100),
+    maxChecksPerRun: Math.max(1, Number($("cfgChecks").value) || DEFAULTS.maxChecksPerRun),
+    sweepPerRun: Math.max(0, Number($("cfgSweep").value) || 0),
     autoApply: $("cfgAuto").checked,
     notify: $("cfgNotify").checked,
   };
