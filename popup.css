@@ -1,0 +1,154 @@
+:root {
+  --bg: #1e1e1e;
+  --panel: #252526;
+  --field: #2d2d30;
+  --text: #e6e6e6;
+  --muted: #9a9a9a;
+  --border: #3c3c3c;
+  --accent: #3f6fb5;
+  --accent-hover: #4d80cc;
+  --ok: #6ac48a;
+  --bad: #e07a7a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  width: 720px;
+  min-height: 480px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "맑은 고딕", "Malgun Gothic", system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status strong { font-size: 14px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+#nextCheck { margin-left: 10px; font-size: 12px; }
+
+button {
+  background: #333337;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+button:hover:not(:disabled) { background: #45454b; }
+button:disabled { color: var(--muted); cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+button.primary:disabled { background: var(--panel); border-color: var(--border); }
+.actions button + button { margin-left: 6px; }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  padding: 9px 14px;
+}
+.tab:hover { background: none; color: var(--text); }
+.tab.on { color: var(--text); border-bottom-color: var(--accent); }
+
+.panel { display: none; padding: 14px; }
+.panel.on { display: block; }
+
+.grid { width: 100%; border-collapse: collapse; }
+.grid th {
+  text-align: left;
+  font-weight: normal;
+  color: var(--muted);
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.grid td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.grid tr:last-child td { border-bottom: none; }
+
+.empty { color: var(--muted); padding: 18px 4px; }
+.hidden { display: none; }
+
+.logbox { margin-top: 14px; }
+.logbox h4 { margin: 0 0 6px; font-weight: normal; color: var(--muted); font-size: 12px; }
+#logs {
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  height: 130px;
+  overflow-y: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  font-family: Consolas, "D2Coding", monospace;
+}
+
+.addrow { display: flex; gap: 6px; margin-bottom: 8px; }
+.addrow #newCode { width: 170px; }
+.addrow #newMemo { flex: 1; }
+
+input[type=text], input[type=number], select {
+  background: var(--field);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); }
+
+#tab-conf label { display: block; margin-bottom: 16px; }
+#tab-conf label input[type=text],
+#tab-conf label input[type=number] { display: block; width: 260px; margin: 5px 0 3px; }
+#tab-conf label span { display: block; }
+#tab-conf label.check { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+#tab-conf label.check span { flex-basis: 100%; margin-left: 22px; }
+#saved { margin-left: 10px; }
+
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.linkbtn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 2px 6px;
+  text-decoration: underline;
+}
+.linkbtn:hover { background: none; color: var(--text); }
+
+.manualbox {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #b58a3f;
+  border-radius: 4px;
+  background: var(--panel);
+}
+.manualbox h4 { margin: 0 0 4px; font-size: 13px; font-weight: normal; }
+.manualbox p { margin: 0 0 8px; }
+
+label.inline { display: inline-flex; align-items: center; gap: 5px; }
+label.inline input { margin: 0; }
+input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="status">
+      <strong id="statusText">대기 중</strong>
+      <span id="nextCheck" class="muted"></span>
+    </div>
+    <div class="actions">
+      <button id="btnCheck">지금 확인</button>
+      <button id="btnApply" class="primary" disabled>재차단 실행</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab on" data-tab="cand">재차단 후보</button>
+    <button class="tab" data-tab="list">영구 관리 명단</button>
+    <button class="tab" data-tab="scan">명단 채우기</button>
+    <button class="tab" data-tab="hist">이력</button>
+    <button class="tab" data-tab="conf">설정</button>
+  </nav>
+
+  <!-- 후보 -->
+  <section id="tab-cand" class="panel on">
+    <table class="grid">
+      <thead>
+        <tr><th>식별자</th><th>사유</th><th>이전 차단</th><th>메모</th></tr>
+      </thead>
+      <tbody id="candBody"></tbody>
+    </table>
+    <p id="candEmpty" class="empty">확인된 후보가 없습니다.</p>
+
+    <div id="manualBox" class="manualbox hidden">
+      <h4>완장이 직접 풀어준 것으로 보임</h4>
+      <p class="muted small">
+        차단 기간이 남았는데 해제돼 있습니다. 신문고 민원 등으로 풀어준 경우로 보여
+        재차단하지 않았습니다. 계속 관리할 필요가 없다면 명단에서 빼세요.
+      </p>
+      <table class="grid">
+        <thead>
+          <tr><th>식별자</th><th>걸었던 기간</th><th>만료 예정이었던 시각</th><th></th></tr>
+        </thead>
+        <tbody id="manualBody"></tbody>
+      </table>
+    </div>
+
+    <div class="logbox">
+      <h4>기록</h4>
+      <div id="logs"></div>
+    </div>
+  </section>
+
+  <!-- 명단 -->
+  <section id="tab-list" class="panel">
+    <div class="addrow">
+      <input id="newCode" type="text" placeholder="식별코드">
+      <select id="newReason">
+        <option>음란성</option><option>광고</option><option>욕설</option>
+        <option>도배</option><option>혐오 콘텐츠</option>
+        <option>저작권 침해</option><option>명예훼손</option>
+      </select>
+      <input id="newMemo" type="text" placeholder="메모 (선택)">
+      <button id="btnAdd" class="primary">추가</button>
+    </div>
+    <p class="muted small">
+      차단 목록 화면 괄호 안의 식별코드를 넣으세요. IP는 자동 갱신되지 않습니다.
+    </p>
+    <div class="addrow">
+      <input id="listSearch" type="text" placeholder="식별코드 · 메모로 찾기" style="flex:1">
+      <span id="listCount" class="muted small" style="align-self:center"></span>
+      <button id="btnRecheck">전체 다시 확인</button>
+    </div>
+    <table class="grid">
+      <thead>
+        <tr><th>식별코드</th><th>사유</th><th>사용</th><th>메모</th><th></th></tr>
+      </thead>
+      <tbody id="listBody"></tbody>
+    </table>
+    <p id="listEmpty" class="empty">명단이 비어 있습니다.</p>
+  </section>
+
+  <!-- 명단 채우기 -->
+  <section id="tab-scan" class="panel">
+    <div class="addrow">
+      <button id="btnScan" class="primary">31일 차단 불러오기</button>
+      <label class="inline muted small">
+        최대
+        <input id="scanPages" type="number" min="1" max="100" value="10" style="width:60px">
+        페이지
+      </label>
+    </div>
+    <p class="muted small">
+      차단 목록에서 31일 차단을 최근 것부터 모아옵니다. 이미 명단에 있는 사람과
+      IP 차단은 빼고 보여줍니다. 재차단 사유는 원래 걸었던 사유를 그대로 씁니다.
+    </p>
+
+    <div id="scanActions" class="addrow hidden">
+      <button id="btnScanAll" class="linkbtn">전체 선택</button>
+      <button id="btnScanNone" class="linkbtn">전체 해제</button>
+      <button id="btnScanAdd" class="primary">선택한 사람 명단에 추가</button>
+    </div>
+
+    <table class="grid">
+      <thead>
+        <tr><th style="width:30px"></th><th>닉네임</th><th>식별코드</th><th>사유</th><th>처리일</th><th>상태</th></tr>
+      </thead>
+      <tbody id="scanBody"></tbody>
+    </table>
+    <p id="scanEmpty" class="empty">아직 불러오지 않았습니다.</p>
+  </section>
+
+  <!-- 이력 -->
+  <section id="tab-hist" class="panel">
+    <table class="grid">
+      <thead>
+        <tr><th>시각</th><th>식별자</th><th>사유</th><th>결과</th></tr>
+      </thead>
+      <tbody id="histBody"></tbody>
+    </table>
+    <p id="histEmpty" class="empty">재차단 이력이 없습니다.</p>
+  </section>
+
+  <!-- 설정 -->
+  <section id="tab-conf" class="panel">
+    <label>갤러리 ID
+      <input id="cfgGallery" type="text">
+      <span class="muted small">갤러리 주소의 id= 뒤에 오는 값</span>
+    </label>
+    <label>확인 시각
+      <input id="cfgTimes" type="text" placeholder="09:30, 21:30">
+      <span class="muted small">쉼표로 구분. 이 시각에 자동으로 확인합니다.</span>
+    </label>
+    <label>한 번에 재차단할 최대 인원
+      <input id="cfgMax" type="number" min="1" max="2000">
+      <span class="muted small">이 인원을 넘으면 실행하지 않고 멈춥니다.
+        오작동으로 멀쩡한 사람까지 무더기로 차단되는 걸 막는 장치입니다.
+        명단 인원보다 넉넉하게 잡으세요.</span>
+    </label>
+    <label class="check">
+      <input id="cfgAuto" type="checkbox">
+      확인 버튼 없이 자동으로 재차단
+      <span class="muted small">익숙해지기 전에는 꺼두는 걸 권합니다.</span>
+    </label>
+    <label class="check">
+      <input id="cfgNotify" type="checkbox">
+      후보를 찾으면 알림 띄우기
+    </label>
+    <button id="btnSave" class="primary">저장</button>
+    <span id="saved" class="muted"></span>
+  </section>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
