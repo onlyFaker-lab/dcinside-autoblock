@@ -103,17 +103,25 @@ function parseDuration(cellHtml) {
   return m ? `${m[1]}${m[2]}` : text;
 }
 
+// 화면 표기와 REASON_VALUES 키의 공백이 다를 수 있다('혐오콘텐츠' 대 '혐오 콘텐츠').
+// 그대로 두면 나중에 blockCodes가 '알 수 없는 사유'로 그룹 전체를 날린다.
+// 공백을 무시하고 맞춰본 뒤, 아는 값으로 되돌려 준다.
 function parseReason(cellHtml) {
   const text = stripTags(cellHtml);
+  const flat = text.replace(/\s+/g, "");
   for (const known of Object.keys(REASON_VALUES)) {
-    if (text.includes(known)) return known;
+    if (flat.includes(known.replace(/\s+/g, ""))) return known;
   }
   return text;
 }
 
-function cell(tr, className) {
+// prefix=true면 이름 뒤에 뭐가 붙어도 잡는다. blockstate가 그렇다.
+// v1.5.1의 정규식이 class="blockstate[^"]*" 였던 건 실제 화면에 접미사가
+// 붙은 걸 봤다는 뜻이다. \b로 조이면 blockstate2 를 놓친다.
+function cell(tr, className, prefix = false) {
+  const tail = prefix ? '[^"]*' : "\\b";
   const re = new RegExp(
-    `<td[^>]*class="[^"]*\\b${className}\\b[^"]*"[^>]*>([\\s\\S]*?)</td>`, "i"
+    `<td[^>]*class="[^"]*\\b${className}${tail}[^"]*"[^>]*>([\\s\\S]*?)</td>`, "i"
   );
   return (tr.match(re) || [])[1] || "";
 }
@@ -152,7 +160,7 @@ export function parseBlockList(html) {
     const num = pick(tr, /class="[^"]*\bblocknum\b[^"]*"[^>]*>([^<]*)</i);
 
     const identity = parseNikCell(cell(tr, "blocknik"));
-    const stateText = stripTags(cell(tr, "blockstate"));
+    const stateText = stripTags(cell(tr, "blockstate", true));
 
     rows.push({
       num,
@@ -165,6 +173,9 @@ export function parseBlockList(html) {
       time: pick(tr, /class="[^"]*\bblock_time\b[^"]*"[^>]*>\s*처리 시간\s*:\s*([^<]*)</i),
       handler: pick(tr, /class="[^"]*\bblock_conduct\b[^"]*"[^>]*>\s*처리자\s*:\s*([^<]*)</i),
       stateText,
+      // 상태 칸을 못 읽으면 released가 false가 되어 전원 '차단 중'으로 보인다.
+      // 후보가 한 명도 안 잡히는데 경고도 없는 상태가 되므로 따로 표시해둔다.
+      stateUnknown: !stateText,
       released: stateText.includes("해제됨"),
     });
   }
@@ -234,61 +245,78 @@ export function chunkCodes(codes, maxlen = CODES_MAXLEN) {
   return batches;
 }
 
-// ?id=g 와 ?id=g&page=1 은 같은 페이지다. 정규화하지 않으면 1페이지를 두 번 읽는다.
-function normalizeUrl(raw) {
-  const u = new URL(raw, BLOCK_URL);
-  const params = [...u.searchParams.entries()]
-    .filter(([k, v]) => v !== "" && !(k === "page" && v === "1"))
-    .sort(([a], [b]) => a.localeCompare(b));
-  u.search = new URLSearchParams(params).toString();
-  return u.toString();
-}
-
-function pageLinks(html) {
-  const m = html.match(/<div class="bottom_paging_box[^"]*">([\s\S]*?)<\/div>/i);
-  if (!m) return [];
-  return [...m[1].matchAll(/href="([^"]+)"/g)]
-    .map((x) => normalizeUrl(decode(x[1])));
-}
-
 // 차단 목록을 페이지 단위로 훑는다.
-// 페이지네이션은 현재 페이지를 링크로 주지 않으므로, 방문한 주소를 기억하며
-// 새로 나오는 링크만 큐에 넣는 방식으로 돈다.
-async function crawlList(galleryId, maxPages, onPage) {
-  const start = normalizeUrl(`${BLOCK_URL}?id=${encodeURIComponent(galleryId)}`);
-  const seen = new Set([start]);
-  const queue = [start];
-  let pages = 0;
+//
+// 예전에는 화면의 페이지네이션에서 링크를 긁어 큐에 넣었다. 그런데 그 방식은
+// 페이징 영역의 마크업에 통째로 의존한다. 클래스 순서가 다르거나 링크가
+// href 없이 자바스크립트로 돌면 링크가 하나도 안 잡히고, 그러면 큐가 비어서
+// 1페이지만 읽고 조용히 끝난다. 실제 갤러리에서 이 일이 났다.
+//
+// 그래서 링크를 보지 않고 page 번호를 직접 올린다. 끝은 내용으로 판단한다.
+// 페이지 파라미터는 'page'가 아니라 'p'다. 't=u'는 이용자 차단 탭(이미지 차단은 t=i).
+// 실제 페이저가 내보내는 주소를 그대로 따랐다 (2026-09-06 확인):
+//   /mgallery/management/block?id=90_00_memory&s=&t=u&p=2
+function listUrl(galleryId, page) {
+  const params = new URLSearchParams({ id: galleryId, t: "u" });
+  if (page > 1) params.set("p", String(page));
+  return `${BLOCK_URL}?${params.toString()}`;
+}
 
-  while (queue.length && pages < maxPages) {
-    const url = queue.shift();
-    const res = await fetch(url, { credentials: "include" });
+// 같은 행인지 알아보는 열쇠.
+// data-num이 내부 차단 ID라 가장 믿을 만하지만, 그것만 쓰면 안 된다.
+// 값이 비었거나 행마다 같은 값이 오는 마크업을 만나면 2페이지가 통째로
+// '이미 본 것'이 되어 1페이지만 읽고 멈춘다. 지금 고치는 그 버그가
+// 다른 문으로 다시 들어오는 셈이다. 그래서 다른 칸까지 묶어서 만든다.
+function rowKey(r) {
+  const code = (r.identity && r.identity.value) || "";
+  return [r.dataNum, r.num, code, r.date, r.time, r.duration].join("|");
+}
+
+// 반환값
+//   pages     실제로 읽은 페이지 수
+//   more      상한에 걸려서 멈췄다 (더 있을 수 있음)
+//   missed    표에 있었는데 못 읽은 행 수 합계
+//   repeated  다음 페이지가 이미 본 내용이라 멈췄다
+async function crawlList(galleryId, maxPages, onPage) {
+  const seen = new Set();
+  let pages = 0, missed = 0;
+  let more = false, repeated = false;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await fetch(listUrl(galleryId, page), { credentials: "include" });
     if (!res.ok) {
-      if (pages === 0) throw new Error(`목록 조회 실패 (HTTP ${res.status})`);
+      if (page === 1) throw new Error(`목록 조회 실패 (HTTP ${res.status})`);
       break;
     }
     const html = await res.text();
     if (!/minor_block_list/.test(html)) {
-      if (pages === 0) {
+      if (page === 1) {
         throw new Error("차단 목록을 읽지 못했습니다. 갤러리 ID와 매니저 권한을 확인하세요.");
       }
       break;
     }
 
-    pages++;
-    onPage(parseBlockList(html), pages);
+    const rows = parseBlockList(html);
+    missed += rows.missedRows || 0;
 
-    for (const link of pageLinks(html)) {
-      if (!seen.has(link)) {
-        seen.add(link);
-        queue.push(link);
-      }
+    if (!rows.length) break;   // 여기서 끝
+
+    // 범위를 넘은 page를 주면 디시가 1페이지를 되돌려주기도 한다.
+    // 이미 본 행만 있으면 더 가봐야 같은 걸 다시 읽는다.
+    const keys = rows.map(rowKey);
+    if (page > 1 && keys.every((k) => seen.has(k))) {
+      repeated = true;
+      break;
     }
-    if (queue.length && pages < maxPages) {
-      await new Promise((r) => setTimeout(r, 300));
-    }
+    for (const k of keys) seen.add(k);
+
+    pages++;
+    onPage(rows, pages);
+
+    if (page === maxPages) { more = true; break; }
+    await new Promise((r) => setTimeout(r, 300));
   }
-  return { pages, more: queue.length > 0 };
+  return { pages, more, missed, repeated };
 }
 
 // 차단 목록에서 특정 기간으로 '지금 차단 중'인 코드를 모은다.
@@ -310,7 +338,9 @@ async function fetchRecentlyBlocked(galleryId, durationLabel, maxPages) {
 // 같은 코드가 여러 번 나오면 가장 최근 것 하나만 남긴다.
 export async function collectByDuration(galleryId, durationLabel, maxPages, onProgress) {
   const map = new Map();
-  const { pages, more } = await crawlList(galleryId, maxPages, (rows, page) => {
+  let scanned = 0;
+  const { pages, more, missed, repeated } = await crawlList(galleryId, maxPages, (rows, page) => {
+    scanned += rows.length;
     for (const r of rows) {
       if (r.duration !== durationLabel) continue;
       if (!r.identity || !r.identity.matchKey) continue;   // IP는 제외
@@ -327,7 +357,7 @@ export async function collectByDuration(galleryId, durationLabel, maxPages, onPr
     }
     if (onProgress) onProgress(page, map.size);
   });
-  return { items: [...map.values()], pages, more };
+  return { items: [...map.values()], pages, more, missed, repeated, scanned };
 }
 
 export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, onProgress) {
@@ -376,8 +406,10 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
 
   // 방금 건 차단은 목록 위쪽에 몰려 있지만, 인원이 많으면 여러 페이지로 밀린다.
   // 4페이지 고정이면 뒤로 밀린 사람이 멀쩡히 걸렸는데도 '실패'로 찍힌다.
-  // 인원에 맞춰 페이지를 늘린다. (한 페이지 약 15행으로 잡고 여유 2페이지)
-  const listPages = Math.min(20, Math.max(4, Math.ceil(codes.length / 15) + 2));
+  // 인원에 맞춰 페이지를 늘린다. 실제 화면에서 한 페이지 30행을 확인했다(2026-09-06).
+  // 여유 2페이지는 그새 다른 완장이 차단을 걸어 목록이 밀리는 경우를 위한 것이다.
+  const ROWS_PER_PAGE = 30;
+  const listPages = Math.min(20, Math.max(4, Math.ceil(codes.length / ROWS_PER_PAGE) + 2));
 
   const blocked = await fetchRecentlyBlocked(galleryId, want, listPages);
   const verified = codes.filter((c) => blocked.has(c));

@@ -21,6 +21,15 @@ const DEFAULTS = {
 // (300명 조회가 400ms 간격이라 2분대. 30분이면 정상 작업이 걸릴 일은 없다)
 const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
 
+// 30분이 넘는 정상 작업도 있을 수 있다(조회 인원을 크게 잡은 경우).
+// 그대로 두면 작업 도중에 잠금이 만료돼 두 번째 실행이 겹친다. 살아 있다고 알린다.
+async function touchBusy() {
+  const { status } = await chrome.storage.local.get("status");
+  if (status && status.busy) {
+    await chrome.storage.local.set({ status: { ...status, busySince: Date.now() } });
+  }
+}
+
 function isBusy(status, now = Date.now()) {
   if (!status || !status.busy) return false;
   return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
@@ -153,7 +162,9 @@ async function runCheck({ auto = false } = {}) {
       const rows = await fetchRowsForCode(settings.galleryId, entry.value);
       const result = analyzeCode(rows, entry.value, entry);
 
-      const unparsed = rows.filter((r) => !r.identity).length;
+      // 식별자를 못 읽었거나, 차단/해제 상태를 못 읽은 행. 후자를 빼먹으면
+      // 해제된 사람이 전원 '차단 중'으로 보이는데 경고가 안 뜬다.
+      const unparsed = rows.filter((r) => !r.identity || r.stateUnknown).length;
       if (unparsed) {
         await log(`  [경고] ${entry.value}: ${unparsed}개 행의 식별자를 읽지 못했습니다.`);
       }
@@ -190,6 +201,8 @@ async function runCheck({ auto = false } = {}) {
       if (result.status === "manual") manual.push(result);
 
       // 조회 진행 상황은 많을 때만 띄엄띄엄 남긴다
+      if ((i + 1) % 25 === 0) await touchBusy();
+
       if (targets.length <= 20 || (i + 1) % 25 === 0 || i + 1 === targets.length) {
         const verdict = {
           candidate: "재차단 필요",
@@ -279,7 +292,7 @@ async function runApply() {
 
       const result = await blockCodes(
         settings.galleryId, codes, reason, HOURS_31D,
-        (msg) => log(msg)
+        async (msg) => { await log(msg); await touchBusy(); }
       );
       const done = new Set(result.verified);
       await log(`  → ${result.message}`);
@@ -345,10 +358,31 @@ async function runScan(pages = 10) {
   await log(`차단 목록에서 31일 차단을 모읍니다 (최대 ${pages}페이지)`);
 
   try {
-    const { items, pages: read, more } = await collectByDuration(
-      settings.galleryId, "31일", pages,
-      (page, found) => { if (page % 3 === 0) log(`  ${page}페이지째, ${found}명 발견`); }
-    );
+    const { items, pages: read, more, missed, repeated, scanned } =
+      await collectByDuration(
+        settings.galleryId, "31일", pages,
+        (page, found) => { if (page % 3 === 0) log(`  ${page}페이지째, ${found}명 발견`); }
+      );
+
+    await log(`  ${read}페이지에서 차단 이력 ${scanned}행을 읽었습니다.`);
+
+    // 페이지 넘기기가 실제로 먹었는지 눈에 보이게 남긴다.
+    // 예전에 링크를 못 읽어 1페이지만 훑고도 조용히 끝난 적이 있다.
+    if (repeated) {
+      await log(
+        `  [안내] 다음 페이지가 앞 페이지와 같은 내용이라 여기서 멈췄습니다.`
+      );
+      await log(
+        `  목록이 ${read}페이지뿐이면 정상입니다. 실제로 더 있는데 이 줄이 떴다면 알려주세요.`
+      );
+    }
+    if (missed) {
+      await log(
+        `  [경고] 표에 있는데 못 읽은 행이 ${missed}개 있습니다. ` +
+        `불러온 명단이 실제보다 적습니다. 디시 화면 구조가 바뀐 것 같습니다.`
+      );
+      notify("차단 목록을 읽지 못했습니다", `${missed}행을 읽지 못했습니다. 결과가 불완전합니다.`);
+    }
 
     const known = new Set(watchlist.map((t) => t.value));
     const fresh = items.filter((i) => !known.has(i.code));
@@ -357,7 +391,7 @@ async function runScan(pages = 10) {
     await log(
       `${read}페이지에서 31일 차단 ${items.length}명 발견, ` +
       `그중 명단에 없는 사람 ${fresh.length}명.` +
-      (more ? " (아직 더 남았습니다. 페이지 수를 늘려보세요)" : "")
+      (more ? ` (${pages}페이지 상한에 걸렸습니다. 페이지 수를 늘려보세요)` : "")
     );
     await setStatus(`명단 후보 ${fresh.length}명`, false);
     return { ok: true };
