@@ -133,6 +133,33 @@ function cell(tr, className, prefix = false) {
 // 호출부는 "이력 없음"으로 읽는다. 아무도 안 막히는데 화면은 조용하다.
 // 빈 결과 자체는 정상일 수 있으므로(이력 없는 코드 검색) 행 표시 개수와
 // 실제 파싱 수를 대조해야 구분이 된다.
+
+// ── 공용 헬퍼 ──────────────────────────────────────────────
+// background.js 도 이걸 가져다 쓴다. 양쪽에 같은 식을 적어두면
+// 한쪽만 고쳤을 때 테스트가 눈치채지 못한다.
+
+// 차단 목록 한 페이지는 30행이다 (2026-09-06 실제 화면 확인).
+// 여유 2페이지는 그새 다른 완장이 차단을 걸어 목록이 밀리는 경우를 위한 것.
+export const ROWS_PER_PAGE = 30;
+export function listPagesFor(count) {
+  return Math.min(20, Math.max(4, Math.ceil(count / ROWS_PER_PAGE) + 2));
+}
+
+// 서비스워커는 작업 도중에도 종료된다. busy 가 true 인 채 남으면
+// 이후 알람이 전부 되돌아가 확장이 조용히 멈춘다. 오래된 잠금은 무시한다.
+export const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
+export function isBusy(status, now = Date.now()) {
+  if (!status || !status.busy) return false;
+  return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
+}
+
+// 예정 시각 비교는 로컬 시간으로 하므로 날짜 키도 로컬이어야 한다.
+// toISOString() 은 UTC 라서 KST 오전 9시 이전 시각에서 날짜가 어긋난다.
+export function localDateKey(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export function parseBlockList(html) {
   const rows = [];
   const meta = (found, expected) => {
@@ -408,8 +435,7 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
   // 4페이지 고정이면 뒤로 밀린 사람이 멀쩡히 걸렸는데도 '실패'로 찍힌다.
   // 인원에 맞춰 페이지를 늘린다. 실제 화면에서 한 페이지 30행을 확인했다(2026-09-06).
   // 여유 2페이지는 그새 다른 완장이 차단을 걸어 목록이 밀리는 경우를 위한 것이다.
-  const ROWS_PER_PAGE = 30;
-  const listPages = Math.min(20, Math.max(4, Math.ceil(codes.length / ROWS_PER_PAGE) + 2));
+  const listPages = listPagesFor(codes.length);
 
   const blocked = await fetchRecentlyBlocked(galleryId, want, listPages);
   const verified = codes.filter((c) => blocked.has(c));

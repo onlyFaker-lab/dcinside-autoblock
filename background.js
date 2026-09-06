@@ -3,7 +3,10 @@
 // 팝업은 닫히면 죽으므로 실제 작업은 전부 여기서 한다.
 // 결과는 chrome.storage에 넣고, 팝업은 그걸 읽어서 보여준다.
 
-import { HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode } from "./dc.js";
+import {
+  HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
+  isBusy, localDateKey,
+} from "./dc.js";
 
 const DEFAULTS = {
   galleryId: "",
@@ -19,7 +22,6 @@ const DEFAULTS = {
 // 이후 알람 틱이 전부 되돌아가고 팝업 버튼도 굳는다. 확장이 조용히 멈추는 것이다.
 // 그래서 시작 시각을 같이 적어두고, 이 시간을 넘긴 잠금은 없는 것으로 본다.
 // (300명 조회가 400ms 간격이라 2분대. 30분이면 정상 작업이 걸릴 일은 없다)
-const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
 
 // 30분이 넘는 정상 작업도 있을 수 있다(조회 인원을 크게 잡은 경우).
 // 그대로 두면 작업 도중에 잠금이 만료돼 두 번째 실행이 겹친다. 살아 있다고 알린다.
@@ -28,11 +30,6 @@ async function touchBusy() {
   if (status && status.busy) {
     await chrome.storage.local.set({ status: { ...status, busySince: Date.now() } });
   }
-}
-
-function isBusy(status, now = Date.now()) {
-  if (!status || !status.busy) return false;
-  return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
 }
 
 async function getState() {
@@ -406,10 +403,6 @@ async function runScan(pages = 10) {
 
 // 예정 시각 비교는 로컬 시간(setHours)으로 한다. 그러니 '오늘' 키도 로컬이어야
 // 한다. toISOString은 UTC라 KST에서 09:00 이전 확인 시각을 넣으면 날짜가 어긋난다.
-function localDateKey(d) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
 
 // 브라우저가 꺼졌다 켜졌으면 진행 중이던 작업은 이미 죽은 것이다. 잠금을 푼다.
 async function clearStaleLock() {
