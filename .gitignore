@@ -1,0 +1,8 @@
+secrets.json
+*.log
+__pycache__/
+*.pyc
+out/
+*.zip
+.DS_Store
+Thumbs.db
