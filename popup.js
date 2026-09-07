@@ -88,6 +88,7 @@ function render() {
     </tr>`).join("");
   $("candEmpty").classList.toggle("hidden",
     state.candidates.length > 0 || state.manual.length > 0);
+  $("shareBox").classList.toggle("hidden", state.candidates.length === 0);
 
   // 완장이 직접 풀어준 대상
   $("manualBox").classList.toggle("hidden", state.manual.length === 0);
@@ -140,6 +141,32 @@ function render() {
   $("listEmpty").classList.toggle("hidden", state.watchlist.length > 0);
 
   // 명단 채우기
+  // ── 명단 정리 탭 ──
+  const clean = cleanRows();
+  const CLEAN_LIMIT = 500;
+  $("cleanBody").innerHTML = clean.slice(0, CLEAN_LIMIT).map(({ t }) => `
+    <tr>
+      <td><input type="checkbox" class="cleanchk" data-code="${esc(t.value)}"${
+        cleanUnchecked.has(t.value) ? "" : " checked"}></td>
+      <td>${esc(t.memo || "-")}</td>
+      <td>${esc(t.value)}</td>
+      <td>${esc(t.reason)}</td>
+      <td class="muted">${
+        t.lastPostAt ? new Date(t.lastPostAt).toLocaleDateString("sv-SE")
+        : t.noPostSince ? `${esc(t.noPostSince)} 이후 글 없음` : "-"}</td>
+      <td>${gallogLabel(t)}</td>
+    </tr>`).join("");
+  $("cleanEmpty").textContent = state.watchlist.length === 0
+    ? "명단이 비어 있습니다."
+    : "지울 만한 사람을 찾지 못했습니다. 위에서 점검을 돌려보세요.";
+  $("cleanEmpty").classList.toggle("hidden", clean.length > 0);
+  $("cleanActions").classList.toggle("hidden", clean.length === 0);
+  const cleanPicked = clean.slice(0, CLEAN_LIMIT)
+    .filter(({ t }) => !cleanUnchecked.has(t.value)).length;
+  $("cleanCount").textContent = clean.length
+    ? `${clean.length}명 중 ${cleanPicked}명 선택` : "";
+  $("btnCleanDel").disabled = cleanPicked === 0;
+
   const sb = $("scanBody");
   const SCAN_LIMIT = 300;
 
@@ -331,6 +358,7 @@ $("manualBody").addEventListener("click", async (e) => {
 let scanReasons = null;
 const scanUnchecked = new Set();
 const NO_REASON = "(사유 없음)";
+const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", "저작권 침해", "명예훼손"];
 const reasonOf = (it) => it.reason || NO_REASON;
 
 // scanReasons 가 null 이면 전체. Set 이면 그 사유만.
@@ -342,8 +370,9 @@ function visibleImports() {
 }
 
 $("btnScan").addEventListener("click", () => {
-  const pages = Math.max(1, Math.min(100, Number($("scanPages").value) || 10));
-  chrome.runtime.sendMessage({ type: "scan", pages });
+  const pages = Math.max(1, Math.min(3000, Number($("scanPages").value) || 10));
+  const until = $("scanUntil").value || "";
+  chrome.runtime.sendMessage({ type: "scan", pages, until });
 });
 
 // 화면을 다시 그리면 체크박스가 새로 만들어지므로 개별 요소가 아니라
@@ -378,6 +407,320 @@ $("scanBody").addEventListener("change", (e) => {
 });
 
 // 보이는 사람에게만 적용한다. 사유로 추린 뒤 그 사람들만 담을 수 있게 하려는 것이다.
+// 갤러리에 그대로 올릴 수 있는 형태로 뽑는다.
+// 완장끼리 개인적으로 주고받을 수 없는 갤러리가 있어서, 공개 게시물에
+// 붙여넣는 것을 전제로 한다. 그래서 닉네임이나 메모는 넣지 않는다.
+$("btnCopyCand").addEventListener("click", async () => {
+  const list = state.candidates;
+  if (!list.length) return;
+
+  const byReason = {};
+  for (const c of list) (byReason[c.reason] ||= []).push(c.code);
+
+  const today = new Date().toLocaleDateString("sv-SE");
+  const lines = [`# 재차단 후보 ${list.length}명 (${today})`];
+  for (const [reason, codes] of Object.entries(byReason)) {
+    lines.push("", `# ${reason} ${codes.length}명`, ...codes);
+  }
+  const text = lines.join("\n");
+
+  try {
+    await navigator.clipboard.writeText(text);
+    const n = Object.keys(byReason).length;
+    alert(
+      `${list.length}명을 복사했습니다.\n\n` +
+      `갤러리에 올리시면 다른 완장이 붙여넣어 쓸 수 있습니다.\n` +
+      (n > 1 ? `사유가 ${n}가지라 사유별로 나눠 적었습니다.\n` : "") +
+      `\n디시 직접 차단 창은 한 번에 500자까지라 인원이 많으면 나눠 넣어야 합니다.`
+    );
+  } catch {
+    alert("복사에 실패했습니다. 팝업을 클릭한 뒤 다시 눌러보세요.");
+  }
+});
+
+// ── 파일로 주고받기 ─────────────────────────────────────────
+// 확장에는 서버가 없다. 완장끼리 넘기려면 사람이 파일이나 글로 옮겨야 한다.
+// 닉네임과 메모는 넣지 않는다. 공개된 자리에 올라갈 수 있는 파일이다.
+const FILE_KIND = "dcblock-share";
+
+function saveFile(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportItems(what, items) {
+  if (!items.length) {
+    alert("내보낼 것이 없습니다.");
+    return;
+  }
+  const gid = state.settings.galleryId || "gallery";
+  const stamp = new Date().toLocaleDateString("sv-SE");
+  const data = {
+    kind: FILE_KIND,
+    what,                       // "candidates" 또는 "watchlist"
+    formatVersion: 1,
+    gallery: gid,
+    exportedAt: new Date().toISOString(),
+    count: items.length,
+    items: items.map((x) => ({ code: x.code, reason: x.reason })),
+  };
+  saveFile(`dcblock-${what}-${gid}-${stamp}.json`, JSON.stringify(data, null, 2));
+}
+
+$("btnExportCand").addEventListener("click", () => {
+  exportItems("candidates", state.candidates);
+});
+
+$("btnExportList").addEventListener("click", () => {
+  const items = state.watchlist.map((t) => ({ code: t.value, reason: t.reason }));
+  exportItems("watchlist", items);
+});
+
+$("btnPickFile").addEventListener("click", () => $("bulkFile").click());
+
+$("bulkFile").addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  e.target.value = "";           // 같은 파일을 다시 골라도 동작하게
+
+  let text;
+  try {
+    text = await file.text();
+  } catch {
+    alert("파일을 읽지 못했습니다.");
+    return;
+  }
+
+  // 우리가 내보낸 JSON이면 사유까지 살려서 읽고,
+  // 아니면 그냥 코드 목록이 든 글로 보고 처리한다.
+  let parsed = null;
+  try {
+    const j = JSON.parse(text);
+    if (j && j.kind === FILE_KIND && Array.isArray(j.items)) parsed = j;
+  } catch { /* JSON 아님 */ }
+
+  if (!parsed) {
+    $("bulkBox").classList.remove("hidden");
+    $("bulkText").value = text;
+    $("bulkText").dispatchEvent(new Event("input"));
+    alert(
+      "이 확장이 만든 파일이 아니라서, 코드만 골라내 아래 칸에 넣었습니다.\n" +
+      "사유를 고르고 '명단에 추가'를 누르세요."
+    );
+    return;
+  }
+
+  if (parsed.gallery && state.settings.galleryId &&
+      parsed.gallery !== state.settings.galleryId) {
+    if (!confirm(
+      `이 파일은 '${parsed.gallery}' 갤러리에서 내보낸 것입니다.\n` +
+      `지금 설정된 갤러리는 '${state.settings.galleryId}' 입니다.\n\n` +
+      `그래도 가져올까요?`
+    )) return;
+  }
+
+  await importItems(parsed.items, parsed.exportedAt);
+});
+
+// JSON 파일에서 읽은 항목을 명단에 넣는다. 사유가 항목마다 다를 수 있다.
+async function importItems(items, exportedAt) {
+  const known = new Set(state.watchlist.map((t) => t.value));
+  const seen = new Set();
+  const fresh = [];
+  for (const it of items) {
+    const code = String(it.code || "").trim();
+    if (!code || seen.has(code) || known.has(code)) continue;
+    seen.add(code);
+    fresh.push({ code, reason: REASONS.includes(it.reason) ? it.reason : "음란성" });
+  }
+  const dup = items.length - fresh.length;
+  if (!fresh.length) {
+    alert(`${items.length}명 전부 이미 명단에 있습니다.`);
+    return;
+  }
+
+  const byReason = {};
+  for (const f of fresh) byReason[f.reason] = (byReason[f.reason] || 0) + 1;
+  const detail = Object.entries(byReason).map(([r, n]) => `  ${r} ${n}명`).join("\n");
+
+  if (!confirm(
+    `${fresh.length}명을 명단에 추가합니다.\n\n${detail}\n` +
+    (dup ? `\n(이미 있거나 중복인 ${dup}명은 건너뜁니다)\n` : "") +
+    (exportedAt ? `\n파일 만든 시각: ${new Date(exportedAt).toLocaleString("ko-KR")}` : "")
+  )) return;
+
+  state.watchlist.push(...fresh.map(({ code, reason }) => ({
+    kind: "code", value: code, reason, memo: "", enabled: true,
+    nextCheckAt: 0, lastVerifiedAt: 0, lastSeen: 0, missingSince: 0,
+  })));
+  await chrome.storage.local.set({ watchlist: state.watchlist });
+  render();
+  alert(`${fresh.length}명을 명단에 넣었습니다.\n\n'지금 확인'을 누르면 재차단 후보로 올라옵니다.`);
+}
+
+$("btnBulkToggle").addEventListener("click", () => {
+  const box = $("bulkBox");
+  box.classList.toggle("hidden");
+  if (!box.classList.contains("hidden")) $("bulkText").focus();
+});
+
+// 갤러리에 올라온 글을 통째로 붙여넣어도 되게 한다.
+// '#'으로 시작하는 줄은 설명이고, 코드 뒤에 닉네임이나 사유가 붙어 있을 수 있다.
+// 식별 코드는 지금까지 본 것이 전부 영문 + 숫자다
+// (capture6180, chip3298, read7286, leaf4517, debate3002).
+// 둘 다 들어 있어야 한다는 조건을 걸면 '2026' 같은 날짜나 'https' 같은
+// 주소 조각을 코드로 잘못 집는 일이 없다.
+const RE_CODE_LIKE = /^(?=[^0-9]*[0-9])(?=[^A-Za-z]*[A-Za-z])[A-Za-z0-9_-]{4,}$/;
+
+function parseBulk(text) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of text.split(/[\r\n]+/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    // 한 줄에 닉네임과 사유가 같이 붙어 있을 수 있다.
+    // 코드처럼 생긴 첫 낱말을 쓴다.
+    const code = (line.match(/[A-Za-z0-9_-]+/g) || []).find((t) => RE_CODE_LIKE.test(t));
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    out.push(code);
+  }
+  return out;
+}
+
+$("bulkText").addEventListener("input", () => {
+  const n = parseBulk($("bulkText").value).length;
+  $("bulkCount").textContent = n ? `${n}명 인식됨` : "";
+});
+
+$("btnBulkAdd").addEventListener("click", async () => {
+  const codes = parseBulk($("bulkText").value);
+  if (!codes.length) {
+    alert("식별 코드를 찾지 못했습니다.");
+    return;
+  }
+  const reason = $("bulkReason").value;
+  const known = new Set(state.watchlist.map((t) => t.value));
+  const fresh = codes.filter((c) => !known.has(c));
+  if (!fresh.length) {
+    alert(`${codes.length}명 전부 이미 명단에 있습니다.`);
+    return;
+  }
+  const dup = codes.length - fresh.length;
+  if (!confirm(
+    `${fresh.length}명을 사유 '${reason}' 으로 명단에 추가합니다.` +
+    (dup ? `\n(이미 명단에 있는 ${dup}명은 건너뜁니다)` : "")
+  )) return;
+
+  state.watchlist.push(...fresh.map((code) => ({
+    kind: "code", value: code, reason, memo: "", enabled: true,
+    nextCheckAt: 0, lastVerifiedAt: 0, lastSeen: 0, missingSince: 0,
+  })));
+  await chrome.storage.local.set({ watchlist: state.watchlist });
+  $("bulkText").value = "";
+  $("bulkCount").textContent = "";
+  $("bulkBox").classList.add("hidden");
+  render();
+});
+
+// ── 명단 정리 ──────────────────────────────────────────────
+// 지울 만한 사람만 추린다. 판정 근거가 확실한 순서로 보여준다.
+//   탈퇴      : 갤로그가 /_error/deleted 로 넘어감. 가장 확실하다.
+//   코드 이상 : 404. 우리가 코드를 잘못 읽었을 수 있으니 지우지 말고 확인부터.
+//   글 없음   : 목록에 안 나옴. 댓글만 다는 사람도 여기 걸린다. 제일 약한 근거다.
+const cleanUnchecked = new Set();
+
+function cleanRows() {
+  return state.watchlist
+    .map((t, i) => ({ t, i }))
+    .filter(({ t }) =>
+      t.kind === "code" &&
+      (t.gallogState === "deleted" || t.gallogState === "notfound" || t.noPostSince)
+    )
+    .sort((a, b) => rank(a.t) - rank(b.t));
+}
+function rank(t) {
+  if (t.gallogState === "deleted") return 0;
+  if (t.gallogState === "notfound") return 1;
+  return 2;
+}
+function gallogLabel(t) {
+  if (t.gallogState === "deleted") return `<span class="bad">탈퇴</span>`;
+  if (t.gallogState === "notfound") return `<span class="bad">코드 확인 필요</span>`;
+  if (t.gallogState === "alive") return `<span class="muted">정상</span>`;
+  if (t.gallogState) return `<span class="muted">판단 불가</span>`;
+  return `<span class="muted">-</span>`;
+}
+
+$("btnActivity").addEventListener("click", () => {
+  const months = Number($("cleanMonths").value);
+  const pages = Math.max(10, Math.min(5000, Number($("cleanPages").value) || 2000));
+  if (!confirm(
+    `갤 글 목록을 최대 ${pages}페이지까지 훑습니다.\n` +
+    `갤이 크면 몇 분에서 십수 분 걸립니다. 창을 닫아도 계속 진행됩니다.\n\n시작할까요?`
+  )) return;
+  chrome.runtime.sendMessage({ type: "activity", months, pages });
+});
+
+$("btnGallog").addEventListener("click", () => {
+  const limit = Math.max(10, Math.min(2000, Number($("cleanLimit").value) || 300));
+  if (!confirm(
+    `${limit}명의 갤로그를 하나씩 확인합니다.\n` +
+    `한 명당 요청 한 번이라 ${Math.ceil(limit * 0.4 / 60)}분쯤 걸립니다.\n\n시작할까요?`
+  )) return;
+  chrome.runtime.sendMessage({ type: "gallog", limit });
+});
+
+$("cleanBody").addEventListener("change", (e) => {
+  const box = e.target.closest(".cleanchk");
+  if (!box) return;
+  if (box.checked) cleanUnchecked.delete(box.dataset.code);
+  else cleanUnchecked.add(box.dataset.code);
+  render();
+});
+
+function setAllClean(checked) {
+  for (const { t } of cleanRows()) {
+    if (checked) cleanUnchecked.delete(t.value);
+    else cleanUnchecked.add(t.value);
+  }
+  render();
+}
+$("btnCleanAll").addEventListener("click", () => setAllClean(true));
+$("btnCleanNone").addEventListener("click", () => setAllClean(false));
+
+$("btnCleanDel").addEventListener("click", async () => {
+  const picked = [...document.querySelectorAll(".cleanchk")]
+    .filter((c) => c.checked).map((c) => c.dataset.code);
+  if (!picked.length) {
+    alert("지울 사람을 선택해주세요.");
+    return;
+  }
+  const set = new Set(picked);
+  const weak = state.watchlist.filter(
+    (t) => set.has(t.value) && t.gallogState !== "deleted" && t.gallogState !== "notfound"
+  ).length;
+
+  if (!confirm(
+    `${picked.length}명을 명단에서 지웁니다.\n\n` +
+    (weak
+      ? `이 중 ${weak}명은 '글이 없다'는 것뿐이고 탈퇴가 확인된 건 아닙니다.\n` +
+        `글 목록에는 댓글이 나오지 않으므로, 댓글로만 활동하는 사람이 섞여 있을 수 있습니다.\n\n`
+      : "") +
+    `지우면 이 사람들의 차단이 풀려도 다시 막지 않습니다.`
+  )) return;
+
+  state.watchlist = state.watchlist.filter((t) => !set.has(t.value));
+  for (const c of picked) cleanUnchecked.delete(c);
+  await chrome.storage.local.set({ watchlist: state.watchlist });
+  render();
+  alert(`${picked.length}명을 명단에서 지웠습니다.`);
+});
+
 function setAllScan(checked) {
   for (const it of visibleImports()) {
     if (checked) scanUnchecked.delete(it.code);

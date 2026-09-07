@@ -304,10 +304,26 @@ function rowKey(r) {
 //   more      상한에 걸려서 멈췄다 (더 있을 수 있음)
 //   missed    표에 있었는데 못 읽은 행 수 합계
 //   repeated  다음 페이지가 이미 본 내용이라 멈췄다
-async function crawlList(galleryId, maxPages, onPage) {
-  const seen = new Set();
+// "2026.09.06" → 20260906. 날짜 비교용.
+function dateNum(s) {
+  const m = /(\d{4})\.(\d{2})\.(\d{2})/.exec(s || "");
+  return m ? Number(m[1] + m[2] + m[3]) : 0;
+}
+
+// opts.untilDate ("2026-08-01") 를 주면 그 날짜보다 오래된 행이 나온 페이지에서
+// 멈춘다. 목록이 최신순이라 그 뒤로는 볼 필요가 없다.
+// 페이지 수를 감으로 찍지 않아도 되고, 필요 이상으로 훑지도 않는다.
+async function crawlList(galleryId, maxPages, onPage, opts = {}) {
+  const until = opts.untilDate ? Number(opts.untilDate.replace(/-/g, "")) : 0;
+  // 수천 페이지를 훑을 때는 간격을 넓혀 디시 쪽 부담을 줄인다.
+  const delay = maxPages > 1000 ? 500 : 300;
+
+  // 이전 페이지의 행만 기억한다. 전체를 모으면 수천 페이지에서 메모리가 계속 는다.
+  // 판별해야 하는 두 경우(범위 밖 페이지를 되돌려주는 것, 파라미터를 무시하는 것)
+  // 모두 '직전 페이지와 같은 내용'으로 나타나므로 이것으로 충분하다.
+  let prevKeys = new Set();
   let pages = 0, missed = 0;
-  let more = false, repeated = false;
+  let more = false, repeated = false, reachedDate = false;
 
   for (let page = 1; page <= maxPages; page++) {
     const res = await fetch(listUrl(galleryId, page), { credentials: "include" });
@@ -331,19 +347,25 @@ async function crawlList(galleryId, maxPages, onPage) {
     // 범위를 넘은 page를 주면 디시가 1페이지를 되돌려주기도 한다.
     // 이미 본 행만 있으면 더 가봐야 같은 걸 다시 읽는다.
     const keys = rows.map(rowKey);
-    if (page > 1 && keys.every((k) => seen.has(k))) {
+    if (page > 1 && keys.every((k) => prevKeys.has(k))) {
       repeated = true;
       break;
     }
-    for (const k of keys) seen.add(k);
+    prevKeys = new Set(keys);
 
     pages++;
-    onPage(rows, pages);
+    await onPage(rows, pages);
+
+    // 목록은 최신순이다. 이 페이지의 마지막 행이 기준일보다 오래됐으면 끝이다.
+    if (until && dateNum(rows[rows.length - 1].date) < until) {
+      reachedDate = true;
+      break;
+    }
 
     if (page === maxPages) { more = true; break; }
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, delay));
   }
-  return { pages, more, missed, repeated };
+  return { pages, more, missed, repeated, reachedDate };
 }
 
 // 차단 목록에서 특정 기간으로 '지금 차단 중'인 코드를 모은다.
@@ -363,13 +385,20 @@ async function fetchRecentlyBlocked(galleryId, durationLabel, maxPages) {
 
 // 명단 채우기용. 지정한 기간으로 걸린 사람을 최근 것부터 모아 준다.
 // 같은 코드가 여러 번 나오면 가장 최근 것 하나만 남긴다.
-export async function collectByDuration(galleryId, durationLabel, maxPages, onProgress) {
+export async function collectByDuration(galleryId, durationLabel, maxPages, onProgress, untilDate) {
   const map = new Map();
+  // 경계를 지났는지 알려면 기준일보다 오래된 행이 나올 때까지 읽어야 한다.
+  // 그 마지막 페이지에는 기준일 밖의 행이 섞여 있으므로 담을 때 걸러낸다.
+  const until = untilDate ? Number(untilDate.replace(/-/g, "")) : 0;
   let scanned = 0;
-  const { pages, more, missed, repeated } = await crawlList(galleryId, maxPages, (rows, page) => {
+  let oldest = "";
+  const { pages, more, missed, repeated, reachedDate } =
+    await crawlList(galleryId, maxPages, async (rows, page) => {
+    oldest = rows[rows.length - 1].date;
     scanned += rows.length;
     for (const r of rows) {
       if (r.duration !== durationLabel) continue;
+      if (until && dateNum(r.date) < until) continue;   // 기준일보다 오래된 행
       if (!r.identity || !r.identity.matchKey) continue;   // IP는 제외
       if (map.has(r.identity.matchKey)) continue;
       map.set(r.identity.matchKey, {
@@ -382,9 +411,29 @@ export async function collectByDuration(galleryId, durationLabel, maxPages, onPr
         released: r.released,
       });
     }
-    if (onProgress) onProgress(page, map.size);
-  });
-  return { items: [...map.values()], pages, more, missed, repeated, scanned };
+    if (onProgress) await onProgress(page, map.size, oldest);
+  }, { untilDate });
+  return {
+    items: [...map.values()],
+    pages, more, missed, repeated, scanned, reachedDate, oldest,
+  };
+}
+
+// 디시는 완장 계정마다 하루 차단 횟수에 한도를 둔다.
+// 한도에 걸리면 그 뒤 요청은 전부 헛수고이므로 즉시 멈춰야 한다.
+// 정확한 문구를 아직 못 봤으므로 넓게 잡고, 원문을 그대로 기록에 남긴다.
+// 실제 문구가 확인되면 여기를 좁히면 된다.
+const RE_DAILY_LIMIT = /(차단\s*횟수|차단\s*가능\s*횟수|일일|하루).{0,20}(모두|전부|초과|없|소진|제한)|(초과|소진).{0,10}차단\s*횟수/;
+
+// 응답에서 사람이 읽을 문구만 뽑아낸다. JSON이면 메시지 필드를 본다.
+function serverMessage(text) {
+  if (!text) return "";
+  try {
+    const j = JSON.parse(text);
+    const m = j.msg || j.message || j.result_msg || j.error || "";
+    if (m) return String(m).trim();
+  } catch { /* JSON이 아니면 원문을 쓴다 */ }
+  return text.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, onProgress) {
@@ -395,6 +444,9 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
 
   const ciT = await getCiToken();
   const batches = chunkCodes(codes);
+  let limitHit = false;
+  let limitMessage = "";
+  let sentCount = 0;
 
   for (let i = 0; i < batches.length; i++) {
     if (onProgress && batches.length > 1) {
@@ -423,8 +475,26 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
     });
     if (!res.ok) throw new Error(`차단 요청 실패 (HTTP ${res.status})`);
 
+    const said = serverMessage(await res.text());
+    if (said && onProgress) onProgress(`    디시 응답: ${said}`);
+
+    if (RE_DAILY_LIMIT.test(said)) {
+      limitHit = true;
+      limitMessage = said;
+      if (onProgress) {
+        onProgress(`  하루 차단 한도에 걸린 것 같습니다. 남은 묶음은 보내지 않습니다.`);
+      }
+      break;   // 더 보내봐야 전부 헛수고다
+    }
+    sentCount += batches[i].length;
+
     if (i + 1 < batches.length) await new Promise((r) => setTimeout(r, 800));
   }
+
+  // 한도에 걸려 아예 보내지 못한 사람은 검증 대상에서 뺀다.
+  // 보내지도 않은 걸 '실패'로 기록하면 이력이 거짓말을 한다.
+  const attempted = limitHit ? codes.slice(0, sentCount) : codes;
+  const notSent = limitHit ? codes.slice(sentCount) : [];
 
   // 서버 응답은 믿지 않는다. 목록을 다시 읽어서 실제로 걸렸는지 확인한다.
   // (목록 체크박스 경로가 성공 알림만 띄우고 아무 일도 안 했던 전례가 있다)
@@ -435,11 +505,13 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
   // 4페이지 고정이면 뒤로 밀린 사람이 멀쩡히 걸렸는데도 '실패'로 찍힌다.
   // 인원에 맞춰 페이지를 늘린다. 실제 화면에서 한 페이지 30행을 확인했다(2026-09-06).
   // 여유 2페이지는 그새 다른 완장이 차단을 걸어 목록이 밀리는 경우를 위한 것이다.
-  const listPages = listPagesFor(codes.length);
+  const listPages = listPagesFor(attempted.length);
 
-  const blocked = await fetchRecentlyBlocked(galleryId, want, listPages);
-  const verified = codes.filter((c) => blocked.has(c));
-  let failed = codes.filter((c) => !blocked.has(c));
+  const blocked = attempted.length
+    ? await fetchRecentlyBlocked(galleryId, want, listPages)
+    : new Set();
+  const verified = attempted.filter((c) => blocked.has(c));
+  let failed = attempted.filter((c) => !blocked.has(c));
 
   // 목록에서 못 찾은 사람은 전원 개별 검색으로 한 번 더 본다.
   // 상한을 두면 그 위로는 확인 없이 실패 처리돼 이력이 거짓말을 하게 된다.
@@ -466,12 +538,19 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
     failed = still;
   }
 
-  const msg = failed.length
+  let msg = failed.length
     ? `${verified.length}건 확인됨, ${failed.length}건 실패: ${failed.slice(0, 10).join(", ")}`
       + (failed.length > 10 ? ` 외 ${failed.length - 10}건` : "")
     : `${verified.length}건 모두 ${want} 차단 확인됨.`;
+  if (limitHit) {
+    msg += ` / 하루 차단 한도로 ${notSent.length}명은 보내지 못했습니다.`;
+  }
 
-  return { ok: failed.length === 0, verified, failed, message: msg };
+  return {
+    ok: failed.length === 0 && !limitHit,
+    verified, failed, message: msg,
+    limitHit, limitMessage, notSent,
+  };
 }
 
 // --------------------------------------------------------------- 후보 판정
@@ -571,3 +650,135 @@ export function pickCandidate(rows, code, entry) {
   const r = analyzeCode(rows, code, entry);
   return r.status === "candidate" ? r.candidate : null;
 }
+
+// ── 갤 게시판 목록 ──────────────────────────────────────────
+// 글쓴이 칸에 식별코드가 data-uid 로 그대로 들어 있다(2026-09-07 확인).
+//   <td class="gall_writer ub-writer" data-nick="ㅇㅇ" data-uid="nanny1568" data-ip="">
+//   <td class="gall_writer ub-writer" data-nick="응붕이" data-uid="" data-ip="220.85">
+// 그래서 목록을 한 번 훑으면 명단 전원의 활동 여부를 동시에 알 수 있다.
+// 사람마다 조회하는 방식이 아니라서 명단이 커져도 요청이 늘지 않는다.
+//
+// 주의: 게시판 목록의 페이지 파라미터는 'page' 다. 차단 목록은 'p' 였다.
+// 두 곳이 다르니 헷갈리지 말 것.
+const BOARD_URL = "https://gall.dcinside.com/mgallery/board/lists";
+export const BOARD_ROWS_PER_PAGE = 100;
+
+function boardUrl(galleryId, page) {
+  const params = new URLSearchParams({ id: galleryId, list_num: String(BOARD_ROWS_PER_PAGE) });
+  if (page > 1) params.set("page", String(page));
+  return `${BOARD_URL}?${params.toString()}`;
+}
+
+const RE_BOARD_ROW = /<tr[^>]*class="[^"]*\bub-content\b[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi;
+const RE_BOARD_MARK = /class="[^"]*\bub-writer\b/i;
+const RE_BOARD_MARK_G = /class="[^"]*\bub-writer\b/gi;
+
+// "2026-09-07 17:05:43" → 20260907
+function dayNumOf(stamp) {
+  const m = /(\d{4})-(\d{2})-(\d{2})/.exec(stamp || "");
+  return m ? Number(m[1] + m[2] + m[3]) : 0;
+}
+
+export function parseBoardList(html) {
+  const rows = [];
+  rows.tableFound = /\bgall_list\b/.test(html);
+  rows.expectedRows = 0;
+  rows.missedRows = 0;
+  if (!rows.tableFound) return rows;
+
+  const body = html.split(/<tbody[^>]*>/i)[1] || html;
+  rows.expectedRows = (body.match(RE_BOARD_MARK_G) || []).length;
+
+  for (const m of body.matchAll(RE_BOARD_ROW)) {
+    const tr = m[1];
+    if (!RE_BOARD_MARK.test(tr)) continue;
+
+    // 공지는 매 페이지마다 딸려 나온다. 활동 판정에 넣으면 완장이 늘 활동 중이 된다.
+    if (/data-type="icon_notice"/.test(m[0])) continue;
+
+    const writer = (tr.match(/<td[^>]*class="[^"]*\bub-writer\b[^"]*"[^>]*>/i) || [])[0] || "";
+    const at = (name) => (writer.match(new RegExp(`${name}="([^"]*)"`)) || [])[1] || "";
+    const uid = at("data-uid");
+    const ip = at("data-ip");
+    const nick = decode(at("data-nick"));
+
+    // 광고/설문 줄은 글쓴이 칸 형태가 달라 uid도 ip도 없다. 조용히 건너뛴다.
+    if (!uid && !ip) continue;
+
+    const stamp = (tr.match(/<td[^>]*class="[^"]*\bgall_date\b[^"]*"[^>]*title="([^"]*)"/i) || [])[1] || "";
+    if (!stamp) { rows.missedRows++; continue; }
+
+    rows.push({ uid, ip, nick, stamp, day: dayNumOf(stamp) });
+  }
+  return rows;
+}
+
+// 게시판 목록을 훑어 식별코드별 마지막 글 날짜를 모은다.
+// untilDate("2026-06-07")보다 오래된 글이 나오면 멈춘다.
+export async function collectActivity(galleryId, maxPages, onProgress, untilDate) {
+  const until = untilDate ? Number(untilDate.replace(/-/g, "")) : 0;
+  const lastPost = new Map();          // uid → "2026-09-07 17:05:43"
+  const delay = maxPages > 1000 ? 500 : 300;
+
+  let prevKeys = new Set();
+  let pages = 0, scanned = 0, missed = 0, oldest = "";
+  let more = false, repeated = false, reachedDate = false;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await fetch(boardUrl(galleryId, page), { credentials: "include" });
+    if (!res.ok) {
+      if (page === 1) throw new Error(`글 목록 조회 실패 (HTTP ${res.status})`);
+      break;
+    }
+    const html = await res.text();
+    const rows = parseBoardList(html);
+    if (!rows.tableFound) {
+      if (page === 1) throw new Error("글 목록을 읽지 못했습니다. 갤러리 ID를 확인하세요.");
+      break;
+    }
+    missed += rows.missedRows;
+    if (!rows.length) break;
+
+    const keys = rows.map((r) => `${r.stamp}|${r.uid || r.ip}`);
+    if (page > 1 && keys.every((k) => prevKeys.has(k))) { repeated = true; break; }
+    prevKeys = new Set(keys);
+
+    for (const r of rows) {
+      if (!r.uid) continue;                       // 유동은 대조할 수 없다
+      if (!lastPost.has(r.uid)) lastPost.set(r.uid, r.stamp);   // 최신순이라 처음 본 게 최신
+    }
+    scanned += rows.length;
+    oldest = rows[rows.length - 1].stamp;
+    pages++;
+    if (onProgress) await onProgress(pages, lastPost.size, oldest);
+
+    if (until && rows[rows.length - 1].day < until) { reachedDate = true; break; }
+    if (page === maxPages) { more = true; break; }
+    await new Promise((r) => setTimeout(r, delay));
+  }
+  return { lastPost, pages, scanned, missed, oldest, more, repeated, reachedDate };
+}
+
+// ── 갤로그 상태 ─────────────────────────────────────────────
+// 2026-09-07 실제 확인:
+//   살아있는 계정   → https://gallog.dcinside.com/<코드>  (공개든 비공개든 정상 응답)
+//   탈퇴한 계정     → https://gallog.dcinside.com/_error/deleted 로 이동
+//   없는 코드       → 404
+// 디시가 차단한 갤로그 화면은 아직 못 봤다. 그건 'other'로 남고 건드리지 않는다.
+// 명단에서 빼는 건 되돌리기 번거로우니, 확실한 것만 후보로 올린다.
+const GALLOG_URL = "https://gallog.dcinside.com";
+
+export async function checkGallog(code) {
+  try {
+    const res = await fetch(`${GALLOG_URL}/${encodeURIComponent(code)}`, {
+      credentials: "omit", redirect: "follow",
+    });
+    if (/\/_error\/deleted/.test(res.url || "")) return "deleted";
+    if (res.status === 404) return "notfound";
+    if (!res.ok) return "other";
+    return "alive";
+  } catch {
+    return "error";
+  }
+}
+

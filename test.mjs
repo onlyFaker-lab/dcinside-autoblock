@@ -248,6 +248,55 @@ console.log("\n[7] 페이지 순회");
   delete globalThis.fetch;
 }
 
+// ── 7-2. 날짜까지만 훑기 ─────────────────────────────────────
+// 페이지 수를 감으로 찍는 대신 "언제까지"로 멈춘다.
+console.log("\n[7-2] 날짜 기준 중단");
+{
+  const PAGE = 30;
+  // 하루에 30명씩 차단된 갤러리. page 1 = 오늘, page 2 = 어제 ...
+  const dayOf = (p) => {
+    const d = new Date("2026-09-07T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - (p - 1));
+    return d.toISOString().slice(0, 10).replace(/-/g, ".");
+  };
+  let asked = 0;
+  globalThis.fetch = async (url) => {
+    const p = Number(new URL(url).searchParams.get("p") || 1);
+    asked++;
+    const body = Array.from({ length: PAGE }, (_, k) =>
+      row({ num: k, dataNum: p * 1000 + k, nik: "ㅇㅇ", code: `p${p}c${k}`, date: dayOf(p) })
+    ).join("");
+    return { ok: true, text: async () => table([body]) };
+  };
+
+  asked = 0;
+  let r = await collectByDuration("gid", "31일", 3000, null, "2026-09-01");
+  // 경계를 지났는지 알려면 기준일보다 오래된 행이 나오는 페이지까지 읽어야 한다.
+  // 9월 1일이 7페이지, 8월 31일이 8페이지라 8페이지에서 멈춘다.
+  eq("경계를 확인하고 멈춤", r.pages, 8);
+  eq("날짜 때문에 멈췄다고 보고", r.reachedDate, true);
+  eq("상한에는 안 걸림", r.more, false);
+  eq("어디까지 봤는지", r.oldest, "2026.08.31");
+  ok("3000페이지가 아니라 8번만 요청", asked === 8, `${asked}회`);
+  // 마지막 페이지의 8월 31일자는 담기지 않아야 한다
+  eq("기준일 밖은 안 담음", r.items.filter((i) => i.date < "2026.09.01").length, 0);
+  eq("9월 1일 ~ 7일 7일치", r.items.length, 7 * 30);
+
+  asked = 0;
+  r = await collectByDuration("gid", "31일", 3, null, "2026-01-01");
+  eq("날짜에 못 닿으면 상한에서 멈춤", r.more, true);
+  eq("reachedDate 는 false", r.reachedDate, false);
+  eq("어디까지 갔는지 알려줌", r.oldest, "2026.09.05");
+
+  // 날짜를 안 주면 예전처럼 페이지 수로만 돈다
+  asked = 0;
+  r = await collectByDuration("gid", "31일", 5);
+  eq("날짜 없으면 상한까지", r.pages, 5);
+  eq("reachedDate 없음", r.reachedDate, false);
+
+  delete globalThis.fetch;
+}
+
 // ── 8. 공용 헬퍼 ─────────────────────────────────────────────
 console.log("\n[8] 공용 헬퍼");
 {
@@ -292,6 +341,133 @@ console.log("\n[9] 만료 시각");
   eq("2026.08.09 21:07:33 + 31일", exp.toLocaleString("sv-SE"), "2026-09-09 21:07:33");
   ok("만료 전에는 아직 안 풀림", exp.getTime() > new Date("2026-09-09T21:00:00").getTime());
   ok("만료 뒤 해제는 수동 아님", !isManualRelease(r, new Date("2026-09-09T21:10:00")));
+}
+
+// ── 10. 하루 차단 한도 ────────────────────────────────────────
+// 한도에 걸리면 남은 묶음을 보내지 않고, 보내지도 않은 사람을
+// '실패'로 기록하지 않아야 한다.
+console.log("\n[10] 하루 차단 한도");
+{
+  const { blockCodes } = await import("./dc.js");
+  globalThis.chrome = { cookies: { get: async () => ({ value: "T" }) } };
+
+  const codes = Array.from({ length: 120 }, (_, i) => `code${String(i).padStart(4, "0")}`);
+  let posts = 0;
+  const blockedNow = new Set();
+
+  globalThis.fetch = async (url, opt = {}) => {
+    if (opt.method === "POST") {
+      posts++;
+      if (posts >= 2) {
+        // 두 번째 묶음부터 한도에 걸린 상황
+        return { ok: true, text: async () =>
+          JSON.stringify({ result: false, msg: "오늘 차단 횟수를 전부 사용했습니다." }) };
+      }
+      for (const c of new URLSearchParams(opt.body).get("user_codes").split("\n")) {
+        blockedNow.add(c);
+      }
+      return { ok: true, text: async () => JSON.stringify({ result: true }) };
+    }
+    const all = [...blockedNow];
+    const kw = new URL(url).searchParams.get("s_keyword");
+    const pick = kw ? all.filter((c) => c === kw) : all.slice(0, 30);
+    return { ok: true, text: async () => table(
+      pick.map((c, i) => row({ num: i, dataNum: 700000 + i, nik: "ㅇㅇ", code: c, state: "차단 중" }))
+    ) };
+  };
+
+  const r = await blockCodes("gid", codes, "음란성", 744, () => {});
+  ok("한도를 알아챔", r.limitHit === true);
+  eq("디시 문구를 그대로 남김", r.limitMessage, "오늘 차단 횟수를 전부 사용했습니다.");
+  ok("한도 뒤로는 안 보냄", posts === 2, `POST ${posts}회`);
+  ok("보낸 사람은 확인됨", r.verified.length > 0);
+  ok("못 보낸 사람이 남음", r.notSent.length > 0);
+  eq("보낸 것 + 못 보낸 것 = 전체", r.verified.length + r.failed.length + r.notSent.length, 120);
+  ok("못 보낸 사람은 실패로 세지 않음", r.failed.every((c) => !r.notSent.includes(c)));
+  ok("ok 는 false", r.ok === false);
+  ok("안내 문구에 남은 인원", /보내지 못했습니다/.test(r.message), r.message);
+
+  delete globalThis.fetch;
+  delete globalThis.chrome;
+}
+
+// ── 11. 활동 점검 / 갤로그 ────────────────────────────────
+console.log("\n[11] 명단 정리");
+{
+  const { parseBoardList, collectActivity, checkGallog } = await import("./dc.js");
+
+  const notice = `<tr class="ub-content us-post" data-no="1" data-type="icon_notice">
+    <td class="gall_writer ub-writer" data-nick="ㅇㅇ" data-uid="manager001" data-ip=""></td>
+    <td class="gall_date" title="2025-09-07 10:00:00">25.09.07</td></tr>`;
+  const ad = `<tr class="ub-content "><td class="gall_writer ub-writer" user_name="운영자"></td>
+    <td class="gall_date">26/08/27</td></tr>`;
+  const post = (no, uid, ip, stamp) => `<tr class="ub-content us-post" data-no="${no}" data-type="icon_txt">
+    <td class="gall_writer ub-writer" data-nick="ㅇㅇ" data-uid="${uid}" data-ip="${ip}"></td>
+    <td class="gall_date" title="${stamp}">시각</td></tr>`;
+  const page = (rows) => `<table class="gall_list"><tbody>${rows.join("")}</tbody></table>`;
+
+  const rows = parseBoardList(page([
+    notice, ad,
+    post(3, "aaa1111", "", "2026-09-07 17:00:00"),
+    post(2, "", "220.85", "2026-09-07 16:00:00"),
+  ]));
+  eq("공지와 광고는 제외", rows.length, 2);
+  // 공지는 매 페이지 붙박이다. 넣으면 완장이 늘 '활동 중'이고 날짜 판정도 망가진다.
+  ok("공지 작성자는 안 들어감", !rows.some((r) => r.uid === "manager001"));
+  eq("고닉 식별코드", rows[0].uid, "aaa1111");
+  eq("유동은 uid 없음", rows[1].uid, "");
+  eq("유동도 IP는 읽음", rows[1].ip, "220.85");
+  eq("가장 오래된 글이 공지가 아님", rows[rows.length - 1].stamp, "2026-09-07 16:00:00");
+
+  // 하루 100글 갤러리
+  const PER = 100;
+  let asked = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    asked.push(u.search);
+    const pg = Number(u.searchParams.get("page") || 1);
+    const d = new Date("2026-09-07T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() - (pg - 1));
+    const day = d.toISOString().slice(0, 10);
+    const body = Array.from({ length: PER }, (_, k) =>
+      pg <= 3 && k === 0
+        ? post(9999, "veteran01", "", `${day} 12:00:00`)
+        : post(90000 - pg * PER - k, `u${pg}_${k}`, "", `${day} 11:00:00`));
+    return { ok: true, text: async () => page([notice, ...body]) };
+  };
+
+  const r = await collectActivity("gid", 2000, null, "2026-06-07");
+  eq("3개월이면 94페이지", r.pages, 94);
+  eq("날짜로 멈춤", r.reachedDate, true);
+  eq("상한에 안 걸림", r.more, false);
+  ok("한 페이지 100개로 요청", asked[0].includes("list_num=100"), asked[0]);
+  // 게시판 목록은 'page'다. 차단 목록('p')과 다르다.
+  ok("게시판은 page 파라미터", asked[1].includes("page=2"), asked[1]);
+  eq("최근 글 날짜 기록", r.lastPost.get("veteran01"), "2026-09-07 12:00:00");
+  ok("기준일 밖 사람은 없음", !r.lastPost.has("u200_0"));
+
+  // page가 안 먹으면 판정을 남기면 안 된다
+  const real = globalThis.fetch;
+  globalThis.fetch = async (u) => real(u.replace(/page=\d+/, "page=1"));
+  const r2 = await collectActivity("gid", 100, null, "2026-06-07");
+  eq("파라미터가 안 먹으면 감지", r2.repeated, true);
+  eq("1페이지에서 멈춤", r2.pages, 1);
+
+  // 갤로그 (2026-09-07 실제 확인한 세 갈래)
+  globalThis.fetch = async (u) => {
+    if (u.includes("deadman")) {
+      return { ok: true, status: 200, url: "https://gallog.dcinside.com/_error/deleted", text: async () => "" };
+    }
+    if (u.includes("zzzz9999")) return { ok: false, status: 404, url: u, text: async () => "" };
+    return { ok: true, status: 200, url: u, text: async () => "<html>갤로그입니다</html>" };
+  };
+  eq("살아있는 계정", await checkGallog("apple8748"), "alive");
+  eq("탈퇴한 계정", await checkGallog("deadman1234"), "deleted");
+  eq("없는 코드는 404", await checkGallog("zzzz9999"), "notfound");
+  // 비공개는 정상 응답이라 alive로 나온다. 그래야 멀쩡한 사람이 안 지워진다.
+  eq("비공개도 alive", await checkGallog("secret0001"), "alive");
+
+  delete globalThis.fetch;
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

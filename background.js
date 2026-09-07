@@ -5,6 +5,7 @@
 
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
+  collectActivity, checkGallog,
   isBusy, localDateKey,
 } from "./dc.js";
 
@@ -281,9 +282,19 @@ async function runApply() {
 
   const stamp = Date.now();
   const records = [];
+  // 하루 차단 한도에 걸려 못 보낸 사람들. 후보에 남겨두고 다음에 다시 시도한다.
+  let remaining = [];
+  let limitHit = false;
+  let limitMessage = "";
 
   try {
     for (const [reason, group] of Object.entries(byReason)) {
+      if (limitHit) {
+        // 이미 한도에 걸렸다면 남은 사유도 보낼 수 없다
+        remaining.push(...group);
+        continue;
+      }
+
       const codes = group.map((c) => c.code);
       await log(`재차단 실행: 사유 '${reason}' ${codes.length}건`);
 
@@ -294,7 +305,16 @@ async function runApply() {
       const done = new Set(result.verified);
       await log(`  → ${result.message}`);
 
+      if (result.limitHit) {
+        limitHit = true;
+        limitMessage = result.limitMessage || "";
+      }
+
+      // 아예 보내지 못한 사람은 이력에 남기지 않는다.
+      // 시도조차 안 한 걸 '실패'로 적으면 나중에 이력을 못 믿게 된다.
+      const notSent = new Set(result.notSent || []);
       for (const c of group) {
+        if (notSent.has(c.code)) { remaining.push(c); continue; }
         records.push({
           time: stamp, code: c.code, label: c.label, reason,
           hours: HOURS_31D, ok: done.has(c.code),
@@ -316,10 +336,25 @@ async function runApply() {
     await saveWatchlistUpdates(upd);
   }
 
+  if (limitHit) {
+    await log(`[중단] 하루 차단 한도에 걸렸습니다.`);
+    if (limitMessage) await log(`  디시가 알려준 문구: ${limitMessage}`);
+    await log(
+      `  ${remaining.length}명을 못 보냈습니다. 후보 목록에 그대로 남겨둡니다.`
+    );
+    await log(
+      `  내일 다시 하거나, 후보 탭의 '남은 후보 복사'로 다른 완장에게 넘기세요.`
+    );
+    notify(
+      "하루 차단 한도에 걸렸습니다",
+      `${remaining.length}명이 남았습니다. 후보 목록에 그대로 있습니다.`
+    );
+  }
+
   const okCount = records.filter((r) => r.ok).length;
   await chrome.storage.local.set({
     history: [...history, ...records].slice(-500),
-    candidates: [],
+    candidates: remaining,
   });
 
   if (okCount === records.length) {
@@ -344,21 +379,42 @@ async function runRecheckAll() {
 
 // --------------------------------------------------------------- 명단 채우기
 
-async function runScan(pages = 10) {
-  const { settings, watchlist } = await getState();
+async function runScan(pages = 10, untilDate = "") {
+  const { settings, watchlist, status } = await getState();
   if (!settings.galleryId) {
     await log("갤러리 ID가 설정되지 않았습니다.");
     return { ok: false };
   }
+  // 수백 페이지를 훑으면 몇 분이 걸린다. 그 사이 또 누르면 두 개가 같이 돈다.
+  if (isBusy(status)) {
+    await log("이미 다른 작업이 돌고 있습니다. 끝난 뒤에 다시 눌러주세요.");
+    return { ok: false };
+  }
 
   await setStatus("31일 차단 목록을 훑는 중...", true);
-  await log(`차단 목록에서 31일 차단을 모읍니다 (최대 ${pages}페이지)`);
+  await log(
+    `차단 목록에서 31일 차단을 모읍니다` +
+    (untilDate ? ` (${untilDate}까지, 최대 ${pages}페이지)` : ` (최대 ${pages}페이지)`)
+  );
+  if (pages >= 100) {
+    await log(`  페이지가 많으면 몇 분에서 수십 분 걸립니다. 창을 닫아도 계속 진행됩니다.`);
+  }
 
   try {
-    const { items, pages: read, more, missed, repeated, scanned } =
+    // 페이지가 많으면 기록이 진행 표시로만 가득 차 버린다(기록은 200줄만 남는다).
+    const step = pages > 50 ? 25 : 3;
+    let ticks = 0;
+    const { items, pages: read, more, missed, repeated, scanned, reachedDate, oldest } =
       await collectByDuration(
         settings.galleryId, "31일", pages,
-        (page, found) => { if (page % 3 === 0) log(`  ${page}페이지째, ${found}명 발견`); }
+        async (page, found, atDate) => {
+          // 잠금 갱신은 자주 해야 한다. 서비스워커는 30초쯤 조용하면 종료된다.
+          if (++ticks % 10 === 0) await touchBusy();
+          if (page % step === 0) {
+            await log(`  ${page}페이지째 (${atDate}), ${found}명 발견`);
+          }
+        },
+        untilDate
       );
 
     await log(`  ${read}페이지에서 차단 이력 ${scanned}행을 읽었습니다.`);
@@ -388,7 +444,11 @@ async function runScan(pages = 10) {
     await log(
       `${read}페이지에서 31일 차단 ${items.length}명 발견, ` +
       `그중 명단에 없는 사람 ${fresh.length}명.` +
-      (more ? ` (${pages}페이지 상한에 걸렸습니다. 페이지 수를 늘려보세요)` : "")
+      (reachedDate ? ` (${untilDate}까지 훑고 멈췄습니다)` : "") +
+      (more
+        ? ` (${pages}페이지 상한에 걸렸습니다. 가장 오래된 행이 ${oldest} 입니다` +
+          (untilDate ? `, 아직 ${untilDate}까지 못 갔습니다` : "") + ")"
+        : "")
     );
     await setStatus(`명단 후보 ${fresh.length}명`, false);
     return { ok: true };
@@ -457,6 +517,157 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // --------------------------------------------------------------- 팝업 요청
 
+// ── 명단 정리 ──────────────────────────────────────────────
+// 명단이 커지면 이미 떠난 사람이 계속 남는다. 두 가지로 걸러낸다.
+//   활동 점검: 갤 글 목록을 한 번 훑어 최근에 글을 쓴 식별코드를 모은다.
+//              명단이 몇 명이든 요청 수가 같다.
+//   갤로그 점검: 탈퇴한 계정을 찾는다. 이건 1인당 1요청이라 비싸다.
+//              활동 점검으로 대상을 줄인 뒤에 돌리는 게 좋다.
+//
+// 어느 쪽도 자동으로 지우지 않는다. 표시만 하고 완장이 확인 후 지운다.
+// 글 목록에는 댓글이 안 나오므로 '댓글로만 활동하는 사람'을 글 없음으로 본다.
+// 이것 하나 때문에라도 자동 삭제는 안 된다.
+
+async function runActivity(months = 3, maxPages = 2000) {
+  const { settings, watchlist, status } = await getState();
+  if (!settings.galleryId) {
+    await log("갤러리 ID가 설정되지 않았습니다.");
+    return { ok: false };
+  }
+  if (isBusy(status)) {
+    await log("이미 다른 작업이 돌고 있습니다.");
+    return { ok: false };
+  }
+  if (!watchlist.length) {
+    await log("명단이 비어 있습니다.");
+    return { ok: false };
+  }
+
+  const cut = new Date();
+  cut.setMonth(cut.getMonth() - months);
+  const untilDate = localDateKey(cut);
+
+  await setStatus("갤 글 목록을 훑는 중...", true);
+  await log(`활동 점검: ${untilDate} 이후 글쓴이를 모읍니다 (최대 ${maxPages}페이지)`);
+  await log(`  한 페이지 100개씩 읽습니다. 갤이 크면 몇 분 걸립니다.`);
+
+  try {
+    let ticks = 0;
+    const r = await collectActivity(
+      settings.galleryId, maxPages,
+      async (page, found, oldest) => {
+        if (++ticks % 10 === 0) await touchBusy();
+        if (page % 25 === 0) await log(`  ${page}페이지째 (${oldest}), 글쓴이 ${found}명`);
+      },
+      untilDate
+    );
+
+    await log(`  ${r.pages}페이지에서 글 ${r.scanned}개를 읽었습니다. 글쓴이 ${r.lastPost.size}명.`);
+    if (r.repeated) {
+      await log(`  [안내] 다음 페이지가 앞 페이지와 같아 멈췄습니다. page 파라미터를 확인하세요.`);
+    }
+    if (r.missed) {
+      await log(`  [경고] 날짜를 못 읽은 줄이 ${r.missed}개 있습니다. 화면 구조가 바뀐 것 같습니다.`);
+      notify("글 목록을 읽지 못했습니다", `${r.missed}줄을 건너뛰었습니다.`);
+    }
+    if (r.more) {
+      await log(`  [안내] ${maxPages}페이지 상한에 걸렸습니다. 가장 오래된 글이 ${r.oldest} 입니다.`);
+      await log(`  ${untilDate}까지 못 갔으므로 '글 없음' 판정은 믿지 마세요. 페이지 수를 늘리세요.`);
+    }
+
+    // 상한에 걸렸으면 판정하지 않는다. 덜 훑고 '글 없음'이라 하면 거짓말이 된다.
+    const trustworthy = !r.more && !r.repeated;
+    const now = Date.now();
+    let quiet = 0;
+
+    for (const t of watchlist) {
+      if (t.kind !== "code") continue;
+      const stamp = r.lastPost.get(t.value);
+      if (stamp) {
+        t.lastPostAt = new Date(stamp.replace(" ", "T")).getTime();
+        t.noPostSince = 0;
+      } else if (trustworthy) {
+        t.lastPostAt = 0;
+        t.noPostSince = untilDate;     // 이 날짜 이후로 글이 없다
+        quiet++;
+      }
+      if (trustworthy) t.activityCheckedAt = now;
+    }
+    await chrome.storage.local.set({ watchlist });
+
+    const msg = trustworthy
+      ? `명단 ${watchlist.length}명 중 ${quiet}명이 ${months}개월간 글이 없습니다.`
+      : `점검이 끝까지 가지 못해 판정을 남기지 않았습니다.`;
+    await log(msg);
+    await setStatus("대기 중", false);
+    if (trustworthy) notify("활동 점검 완료", msg);
+    return { ok: true, quiet, trustworthy };
+  } catch (e) {
+    await log(`[오류] ${e.message}`);
+    await setStatus("오류 발생", false);
+    return { ok: false, error: e.message };
+  }
+}
+
+async function runGallog(limit = 300) {
+  const { watchlist, status } = await getState();
+  if (isBusy(status)) {
+    await log("이미 다른 작업이 돌고 있습니다.");
+    return { ok: false };
+  }
+
+  // 오래 확인 안 한 사람부터. 이미 탈퇴로 확인된 사람은 다시 안 본다.
+  const targets = watchlist
+    .filter((t) => t.kind === "code" && t.gallogState !== "deleted")
+    .sort((a, b) => (a.gallogCheckedAt || 0) - (b.gallogCheckedAt || 0))
+    .slice(0, limit);
+
+  if (!targets.length) {
+    await log("갤로그를 확인할 대상이 없습니다.");
+    return { ok: true, checked: 0 };
+  }
+
+  await setStatus(`갤로그 확인 중 (0/${targets.length})`, true);
+  await log(`갤로그 점검: ${targets.length}명을 확인합니다. 한 명당 한 번씩 요청합니다.`);
+
+  const tally = { deleted: 0, notfound: 0, alive: 0, other: 0, error: 0 };
+  const now = Date.now();
+
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const state = await checkGallog(t.value);
+      t.gallogState = state;
+      t.gallogCheckedAt = now;
+      tally[state] = (tally[state] || 0) + 1;
+
+      if ((i + 1) % 10 === 0) {
+        await touchBusy();
+        await setStatus(`갤로그 확인 중 (${i + 1}/${targets.length})`, true);
+      }
+      if (i + 1 < targets.length) await new Promise((r) => setTimeout(r, 400));
+    }
+    await chrome.storage.local.set({ watchlist });
+
+    await log(
+      `  탈퇴 ${tally.deleted}명, 코드 확인 필요 ${tally.notfound}명, ` +
+      `정상 ${tally.alive}명, 판단 불가 ${tally.other + tally.error}명`
+    );
+    if (tally.notfound) {
+      await log(`  [안내] 404가 나온 코드는 자동으로 지우지 않습니다. 직접 확인해 주세요.`);
+    }
+    await setStatus("대기 중", false);
+    if (tally.deleted) {
+      notify("탈퇴한 계정을 찾았습니다", `${tally.deleted}명. 명단 정리 탭에서 확인하세요.`);
+    }
+    return { ok: true, checked: targets.length, tally };
+  } catch (e) {
+    await log(`[오류] ${e.message}`);
+    await setStatus("오류 발생", false);
+    return { ok: false, error: e.message };
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
@@ -470,8 +681,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg.type === "check") sendResponse(await runCheck({ auto: false }));
       else if (msg.type === "apply") sendResponse(await runApply());
-      else if (msg.type === "scan") sendResponse(await runScan(msg.pages));
+      else if (msg.type === "scan") sendResponse(await runScan(msg.pages, msg.until));
       else if (msg.type === "recheckAll") sendResponse(await runRecheckAll());
+      else if (msg.type === "activity") sendResponse(await runActivity(msg.months, msg.pages));
+      else if (msg.type === "gallog") sendResponse(await runGallog(msg.limit));
       else sendResponse({ ok: false, error: "알 수 없는 요청" });
     } catch (e) {
       await log(`[오류] ${e.message}`);
