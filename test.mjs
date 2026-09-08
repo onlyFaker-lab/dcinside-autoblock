@@ -13,7 +13,9 @@ import {
   parseBlockList, analyzeCode, chunkCodes, collectByDuration,
   expiresAt, isManualRelease, labelForHours,
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
+  jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
 } from "./dc.js";
+import { readFileSync } from "node:fs";
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = "") {
@@ -191,6 +193,34 @@ console.log("\n[3] 파싱 실패 감지");
   const empty = parseBlockList(table([]));
   eq("빈 표는 누락 아님", empty.missedRows, 0);
   eq("표 없으면 tableFound false", parseBlockList("<div>없음</div>").tableFound, false);
+
+  eq("못 읽은 행은 broken", rowHealth(r).broken, true);
+  ok("정상 표는 broken 아님", !rowHealth(parseBlockList(table([
+    row({ nik: "ㅇㅇ", code: "chip3298" }),
+  ]))).broken);
+
+  // v1.5.2에서 실제로 났던 사고. 행 수는 딱 맞는데 상태 칸만 안 읽힌다.
+  // missedRows가 0이라 행 수 대조로는 절대 안 잡힌다. 놓치면 해제된 사람이
+  // 전원 '차단 중'으로 보이고 후보가 0건이 되는데 화면은 조용하다.
+  const stateBroken = parseBlockList(
+    table([row({ nik: "ㅇㅇ", code: "chip3298", state: "해제됨" })])
+      .replace('class="blockstate txtbtn"', 'class="blk_state txtbtn"')
+  );
+  eq("행 자체는 읽힘", stateBroken.length, 1);
+  eq("행 수 대조로는 못 잡음", stateBroken.missedRows, 0);
+  eq("상태 못 읽음 표시", stateBroken[0].stateUnknown, true);
+  eq("해제됨인데 차단 중으로 보임", stateBroken[0].released, false);
+  eq("rowHealth가 상태 실패를 잡음", rowHealth(stateBroken).badState, 1);
+  eq("상태 실패도 broken", rowHealth(stateBroken).broken, true);
+
+  // 식별자만 못 읽는 경우. analyzeCode가 그 행을 남의 것으로 보고 버린다.
+  const idBroken = parseBlockList(
+    table([row({ nik: "ㅇㅇ", code: "chip3298" })])
+      .replace('class="blocknik"', 'class="block_nik"')
+  );
+  eq("식별자 못 읽음", idBroken[0].identity, null);
+  eq("rowHealth가 식별자 실패를 잡음", rowHealth(idBroken).badIdentity, 1);
+  eq("식별자 실패도 broken", rowHealth(idBroken).broken, true);
 }
 
 // ── 4. 판정 ──────────────────────────────────────────────────
@@ -267,7 +297,7 @@ console.log("\n[7] 페이지 순회");
       const s = (page - 1) * PAGE;
       const body = s >= total ? "" : Array.from(
         { length: Math.min(PAGE, total - s) },
-        (_, k) => row({ num: total - s - k, dataNum: 90000 + s + k, nik: "ㅇㅇ", code: `c${s + k}` })
+        (_, k) => row({ num: total - s - k, dataNum: 90000 + s + k, nik: "ㅇㅇ", code: `c${s + k}`, state: "차단 중" })
       ).join("");
       return { ok: true, text: async () => table([body]) };
     };
@@ -319,7 +349,7 @@ console.log("\n[7-2] 날짜 기준 중단");
     const p = Number(new URL(url).searchParams.get("p") || 1);
     asked++;
     const body = Array.from({ length: PAGE }, (_, k) =>
-      row({ num: k, dataNum: p * 1000 + k, nik: "ㅇㅇ", code: `p${p}c${k}`, date: dayOf(p) })
+      row({ num: k, dataNum: p * 1000 + k, nik: "ㅇㅇ", code: `p${p}c${k}`, date: dayOf(p), state: "차단 중" })
     ).join("");
     return { ok: true, text: async () => table([body]) };
   };
@@ -444,6 +474,31 @@ console.log("\n[10] 하루 차단 한도");
   ok("못 보낸 사람은 실패로 세지 않음", r.failed.every((c) => !r.notSent.includes(c)));
   ok("ok 는 false", r.ok === false);
   ok("안내 문구에 남은 인원", /보내지 못했습니다/.test(r.message), r.message);
+
+  // ── 첫 묶음부터 걸리는 경우 ──────────────────────────────
+  // 2026-09-08 주딱 계정에서 실제로 이렇게 났다. 한 명도 못 보낸 상황인데
+  // "0건 모두 31일 차단 확인됨" / "완료: 0/0건 확인" 이라고 나왔다.
+  // 아무 일도 안 일어났는데 성공처럼 읽힌다. 원칙 2번이 경계하는 형태다.
+  posts = 0;
+  blockedNow.clear();
+  globalThis.fetch = async (url, opt = {}) => {
+    if (opt.method === "POST") {
+      posts++;
+      return { ok: true, text: async () =>
+        JSON.stringify({ result: false,
+          msg: "일일 차단 횟수가 초과되어 장시간 차단이 불가능합니다." }) };
+    }
+    return { ok: true, text: async () => table([]) };
+  };
+
+  const first = await blockCodes("gid", ["aaa1111", "bbb2222"], "음란성", 744, () => {});
+  eq("첫 묶음만 보내고 멈춤", posts, 1);
+  eq("확인된 사람 없음", first.verified.length, 0);
+  eq("실패로 세지 않음", first.failed.length, 0);
+  eq("전원 미전송으로 남김", first.notSent.length, 2);
+  ok("성공처럼 말하지 않는다", !/모두 .*차단 확인됨/.test(first.message), first.message);
+  ok("한 명도 못 보냈다고 말함", /한 명도 보내지 못했습니다/.test(first.message), first.message);
+  ok("ok 는 false", first.ok === false);
 
   delete globalThis.fetch;
   delete globalThis.chrome;
@@ -622,6 +677,30 @@ console.log("\n[12] 갤로그 글·댓글 수 (2026-09-08 실제 마크업)");
     '<h2 class="tit">댓글<span class="num">(5)</span></h2>'), null);
   eq("빈 입력도 null", parseGallogCounts(""), null);
 
+  // ⚠ 천 단위 쉼표. 2026-09-08 capture6180 갤로그에서 실제로 본 값이다.
+  //   게시글(4,972)  댓글(9,288)  스크랩(0)  방명록(14)
+  // v1.6.4는 스크랩·방명록만 잡고 게시글·댓글을 놓쳐서 null을 냈다.
+  // 활동 많은 계정이 전부 여기 걸린다. 큰 갤에서는 그쪽이 다수다.
+  const withComma = GALLOG_HOME
+    .replace("(29)", "(4,972)")
+    .replace("(332)", "(9,288)")
+    .replace("(14)", "(14)");
+  // null이 와도 뒤 검사가 예외로 죽지 않게 받아둔다. 죽으면 남은 검사가
+  // 아예 안 돌아서 무엇이 깨졌는지 덜 보인다.
+  const cc = parseGallogCounts(withComma) || {};
+  ok("쉼표가 있어도 읽는다", parseGallogCounts(withComma) !== null, "null이 나왔다");
+  eq("천 단위 게시글", cc.posts, 4972);
+  eq("천 단위 댓글", cc.comments, 9288);
+  eq("천 단위 합계", cc.total, 4972 + 9288);
+
+  // 한쪽만 쉼표인 경우도 있다
+  const mixed = parseGallogCounts(GALLOG_HOME.replace("(332)", "(1,004)")) || {};
+  eq("한쪽만 쉼표", mixed.total, 29 + 1004);
+
+  // 쉼표를 허용하면서 엉뚱한 걸 줍지 않는지
+  eq("여전히 빈 화면은 null", parseGallogCounts("<html></html>"), null);
+
+
   // 왼쪽 메뉴의 '댓글' 링크를 숫자로 착각하면 안 된다
   const menu = `<li class="comment"><a href="/x/comment">댓글</a></li>` + GALLOG_HOME;
   eq("메뉴에 속지 않음", parseGallogCounts(menu).comments, 332);
@@ -649,6 +728,113 @@ console.log("\n[13] 갤로그 변동 추적");
   record({ total: 300 }, now);
   eq("숫자가 줄어도 변동으로 봄", t.gallogSince, now);
   ok("줄어든 것도 활동이라 명단에 남는다", t.gallogTotal === 300);
+}
+
+
+// ── 14. 명단 채우기: 해제된 사람 거르기 ─────────────────────
+// 파딱 피드백(2026-09-08): 이미 차단이 해제된 사람이 섞여 나온다.
+console.log("\n[14] 해제된 사람 거르기");
+{
+  // 같은 코드가 두 번 나오는 경우가 핵심이다. 목록은 최신순이라
+  // 위쪽(해제됨)이 그 사람의 현재 상태다. 담기 전에 released를 거르면
+  // 아래쪽의 옛 '차단 중' 행을 주워서 지금 차단 중인 것처럼 보이게 된다.
+  const body = [
+    row({ num: 4, dataNum: 401, nik: "ㅇㅇ", code: "aaa1111", state: "차단 중" }),
+    row({ num: 3, dataNum: 402, nik: "ㅇㅇ", code: "bbb2222", state: "해제됨" }),
+    row({ num: 2, dataNum: 403, nik: "ㅇㅇ", code: "ccc3333", state: "해제됨",
+          date: "2026.09.05" }),
+    row({ num: 1, dataNum: 404, nik: "ㅇㅇ", code: "ccc3333", state: "차단 중",
+          date: "2026.08.20" }),
+  ].join("");
+  globalThis.fetch = async (url) => {
+    const p = Number(new URL(url).searchParams.get("p") || 1);
+    return { ok: true, text: async () => table([p === 1 ? body : ""]) };
+  };
+
+  let r = await collectByDuration("gid", "31일", 5);
+  eq("기본은 차단 중인 사람만", r.items.length, 1);
+  eq("남은 사람", r.items[0].code, "aaa1111");
+  eq("걸러낸 인원을 알려줌", r.releasedSkipped, 2);
+  ok("옛 차단 중 행을 줍지 않는다",
+     !r.items.some((i) => i.code === "ccc3333"),
+     JSON.stringify(r.items.map((i) => i.code)));
+
+  r = await collectByDuration("gid", "31일", 5, null, "", true);
+  eq("켜면 해제된 사람도 나옴", r.items.length, 3);
+  eq("켰을 때는 걸러낸 게 없음", r.releasedSkipped, 0);
+  eq("그때도 최신 행 기준", r.items.find((i) => i.code === "ccc3333").released, true);
+  delete globalThis.fetch;
+}
+
+// ── 15. 요청 간격 흔들기 ────────────────────────────────────
+// 2026-09-08 갤로그 300명을 400ms 고정 간격으로 돌린 뒤 IP가 막혔다.
+// 일정한 간격 자체가 사람이 만들 수 없는 신호다.
+console.log("\n[15] 요청 간격");
+{
+  const vals = Array.from({ length: 400 }, () => jitter(1000));
+  ok("아래로 안 벗어남", Math.min(...vals) >= 600, `${Math.min(...vals)}`);
+  ok("위로 안 벗어남", Math.max(...vals) <= 1400, `${Math.max(...vals)}`);
+  ok("값이 실제로 흔들린다", new Set(vals).size > 50, `${new Set(vals).size}가지`);
+
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  ok("평균은 기준값 근처", Math.abs(avg - 1000) < 60, `${Math.round(avg)}`);
+
+  // spread=0 이면 흔들지 않는다. 간격을 고정하고 싶을 때 쓸 수 있어야 한다.
+  eq("흔들림 0이면 그대로", jitter(800, 0), 800);
+
+  // 갤로그 간격이 사고 당시(400ms)보다 확실히 느려야 한다.
+  ok("갤로그 간격이 400ms보다 느림", GALLOG_DELAY_MS > 400, `${GALLOG_DELAY_MS}`);
+
+  // 정기 확인도 한 명당 한 요청이라 같은 기준을 받는다.
+  ok("정기 확인 간격이 400ms보다 느림", CHECK_DELAY_MS > 400, `${CHECK_DELAY_MS}`);
+
+  // 상수만 검사하면 background.js가 다시 리터럴로 돌아가도 통과한다.
+  // v1.6.5까지 실제로 그 상태였다 — 상수는 1200인데 루프는 400을 쓰고 있었다.
+  // 그래서 원본을 읽어 '난수를 안 거친 대기'가 남아 있는지 직접 본다.
+  const bgSrc = readFileSync(new URL("./background.js", import.meta.url), "utf8");
+  const waits = bgSrc.match(/setTimeout\(\s*r\s*,[^)]*\)/g) || [];
+  ok("대기가 실제로 있다", waits.length >= 2, `${waits.length}개`);
+  ok(
+    "background.js에 고정 간격 대기가 없다",
+    waits.every((w) => /jitter\(/.test(w)),
+    waits.filter((w) => !/jitter\(/.test(w)).join(" / ") || "전부 난수"
+  );
+  ok("연속 실패 상한이 있다", GALLOG_FAIL_STREAK > 0 && GALLOG_FAIL_STREAK <= 10,
+     `${GALLOG_FAIL_STREAK}`);
+}
+
+
+// ── 16. 안 본 사람의 판정을 남기는가 ────────────────────────
+// runCheck가 후보·수동해제 목록을 통째로 덮어써서, 이번에 조회하지 않은
+// 사람의 판정이 조용히 사라지던 문제.
+console.log("\n[16] 판정 이어가기");
+{
+  const watched = new Set(["aaa1111", "bbb2222", "ccc3333"]);
+
+  // manual 판정은 7일 뒤에 다시 본다. 그래서 다음 조회 대상에서 빠지는데,
+  // 그때 목록이 비면 '명단에서 빼기' 버튼까지 같이 사라진다.
+  const prevManual = [{ code: "bbb2222" }, { code: "ccc3333" }];
+  const kept = carryOver(prevManual, new Set(["aaa1111"]), watched);
+  eq("안 본 사람은 남는다", kept.length, 2);
+
+  // 이번에 다시 본 사람은 새 판정으로 갈아끼워야 하므로 남기지 않는다
+  eq("이번에 본 사람은 뺀다",
+     carryOver(prevManual, new Set(["bbb2222"]), watched).length, 1);
+
+  // 명단에서 빠졌거나 중지된 사람은 되살리지 않는다. 사용자가 뺀 것이다.
+  eq("명단에 없으면 안 남긴다",
+     carryOver(prevManual, new Set(), new Set(["aaa1111"])).length, 0);
+
+  // 하루 한도에 걸려 못 보낸 후보도 같은 장치로 살아남는다
+  const leftover = [{ code: "ccc3333", reason: "음란성" }];
+  const c = carryOver(leftover, new Set(["aaa1111", "bbb2222"]), watched);
+  eq("한도로 남은 후보 유지", c.length, 1);
+  eq("내용이 그대로", c[0].reason, "음란성");
+
+  // 방어: 빈 값이나 code 없는 항목에 죽지 않아야 한다
+  eq("빈 목록", carryOver(undefined, new Set(), watched).length, 0);
+  eq("code 없는 항목은 버림",
+     carryOver([{ nick: "ㅇㅇ" }, null], new Set(), watched).length, 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

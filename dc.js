@@ -155,6 +155,35 @@ export function isBusy(status, now = Date.now()) {
 
 // 예정 시각 비교는 로컬 시간으로 하므로 날짜 키도 로컬이어야 한다.
 // toISOString() 은 UTC 라서 KST 오전 9시 이전 시각에서 날짜가 어긋난다.
+// 요청 간격에 흔들림을 준다.
+//
+// 2026-09-08에 파딱 계정이 실제로 IP 차단을 당했다. 갤로그 300명을 400ms 고정
+// 간격으로 조회한 직후였고, 30분 넘게 디시 전체가 하얀 화면이 됐다. 다른
+// 사이트와 같은 와이파이의 폰은 멀쩡했으니 계정이 아니라 IP 단위였다.
+//
+// 일정한 간격은 사람이 만들 수 없는 신호다. 평균을 늦추는 것만으로는 부족하고
+// 간격 자체가 흔들려야 한다. base의 60%~140% 사이에서 고른다.
+export function jitter(base, spread = 0.4) {
+  const lo = base * (1 - spread);
+  const hi = base * (1 + spread);
+  return Math.round(lo + Math.random() * (hi - lo));
+}
+
+// 갤로그는 한 명당 한 요청이라 가장 위험한 경로다. 400ms에서 올렸다.
+export const GALLOG_DELAY_MS = 1200;
+
+// 정기 확인(runCheck)도 한 명당 한 요청이라 갤로그와 모양이 같다. 그런데 이쪽은
+// 사람이 누르지 않아도 알람으로 저절로 돈다. 게다가 명단 채우기로 새로 담긴
+// 사람은 nextCheckAt이 0이라 전원이 한꺼번에 조회 대상이 되고, 상한(기본 300명)
+// 까지 연달아 나간다. 사고가 났을 때의 '300명 × 400ms 고정'과 같은 조건이다.
+// v1.6.5까지 여기만 난수가 빠져 있었다.
+export const CHECK_DELAY_MS = 1200;
+
+// 연속으로 이만큼 실패하면 중단한다. 실제 사고 때 42명까지 읽히다가 258명이
+// 내리 실패했는데, 확장은 그걸 '화면 구조가 바뀐 것 같다'고 보고하며 끝까지
+// 요청을 계속 보냈다. 이미 막힌 뒤에 258번을 더 두드린 셈이다.
+export const GALLOG_FAIL_STREAK = 5;
+
 export function localDateKey(d) {
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -207,6 +236,42 @@ export function parseBlockList(html) {
     });
   }
   return meta(true, expected);
+}
+
+// 행 수만 대조하면 조용한 실패를 놓친다.
+// 표는 멀쩡히 읽었는데 칸 하나를 못 읽는 경우가 실제로 있었다(v1.5.2의 blockstate).
+// 그때는 missedRows가 0이라 아무 경고도 안 떴고, 해제된 사람이 전원 '차단 중'으로
+// 보이면서 후보가 한 명도 안 잡혔다. 무엇이 깨졌는지 종류별로 세어서 돌려준다.
+//
+// badState    상태 칸을 못 읽음 → 해제된 사람이 '차단 중'으로 보인다
+// badIdentity 식별자를 못 읽음 → analyzeCode가 그 행을 남의 것으로 보고 버린다
+// missed      표에 있는데 행 자체를 못 읽음
+// 이번에 조회하지 않은 사람의 옛 판정을 남긴다.
+//
+// runCheck가 후보·수동해제 목록을 통째로 덮어쓰면, 이번에 안 본 사람의 판정이
+// 조용히 사라진다. 실제로 두 가지가 이렇게 없어졌다.
+//   - '완장이 직접 해제' 목록: manual 판정은 7일 뒤에 다시 보므로 다음 조회
+//     때 대상에서 빠지고, 그 순간 목록과 '명단에서 빼기' 버튼이 같이 사라진다.
+//   - 하루 차단 한도에 걸려 못 보낸 후보: 다음 조회 한 번이면 없어진다.
+//
+// 명단에서 빠졌거나 중지된 사람은 남기지 않는다. 그건 사용자가 뺀 것이다.
+export function carryOver(prevList, checkedNow, stillWatched) {
+  return (prevList || []).filter(
+    (x) => x && x.code && !checkedNow.has(x.code) && stillWatched.has(x.code)
+  );
+}
+
+export function rowHealth(rows) {
+  let badState = 0, badIdentity = 0;
+  for (const r of rows) {
+    if (r.stateUnknown) badState++;
+    if (!r.identity) badIdentity++;
+  }
+  const missed = rows.missedRows || 0;
+  return {
+    missed, badState, badIdentity,
+    broken: missed > 0 || badState > 0 || badIdentity > 0,
+  };
 }
 
 // --------------------------------------------------------------- 통신
@@ -363,7 +428,9 @@ async function crawlList(galleryId, maxPages, onPage, opts = {}) {
     }
 
     if (page === maxPages) { more = true; break; }
-    await new Promise((r) => setTimeout(r, delay));
+    // 간격을 흔든다. 갤로그만큼 요청이 많진 않지만 수천 페이지를 훑을 수 있어
+    // 총량은 더 클 수도 있다. 일정한 간격 자체가 신호다(5-5절).
+    await new Promise((r) => setTimeout(r, jitter(delay)));
   }
   return { pages, more, missed, repeated, reachedDate };
 }
@@ -385,7 +452,19 @@ async function fetchRecentlyBlocked(galleryId, durationLabel, maxPages) {
 
 // 명단 채우기용. 지정한 기간으로 걸린 사람을 최근 것부터 모아 준다.
 // 같은 코드가 여러 번 나오면 가장 최근 것 하나만 남긴다.
-export async function collectByDuration(galleryId, durationLabel, maxPages, onProgress, untilDate) {
+// includeReleased=false(기본)면 지금 차단 중인 사람만 돌려준다.
+//
+// 파딱 피드백(2026-09-08): 명단 채우기에 이미 해제된 사람이 섞여 나온다.
+// 대부분은 차단 중인 사람만 필요하다. 다만 해제된 사람을 명단에 넣고 싶은
+// 경우도 있다고 해서 없애지 않고 옵션으로 뺐다.
+//
+// 거르는 순서가 중요하다. 목록이 최신순이라 같은 코드의 첫 행이 그 사람의
+// 현재 상태다. 담기 전에 released를 거르면, 최신 행이 '해제됨'인 사람의
+// 옛 '차단 중' 행을 주워서 지금 차단 중인 것처럼 보이게 된다.
+// 그래서 최신 행으로 먼저 추리고, 거르는 건 맨 마지막에 한다.
+export async function collectByDuration(
+  galleryId, durationLabel, maxPages, onProgress, untilDate, includeReleased = false
+) {
   const map = new Map();
   // 경계를 지났는지 알려면 기준일보다 오래된 행이 나올 때까지 읽어야 한다.
   // 그 마지막 페이지에는 기준일 밖의 행이 섞여 있으므로 담을 때 걸러낸다.
@@ -413,8 +492,13 @@ export async function collectByDuration(galleryId, durationLabel, maxPages, onPr
     }
     if (onProgress) await onProgress(page, map.size, oldest);
   }, { untilDate });
+
+  const all = [...map.values()];
+  const items = includeReleased ? all : all.filter((it) => !it.released);
   return {
-    items: [...map.values()],
+    items,
+    // 몇 명을 걸러냈는지 알려준다. 말없이 사라지면 그것도 조용한 실패다.
+    releasedSkipped: all.length - items.length,
     pages, more, missed, repeated, scanned, reachedDate, oldest,
   };
 }
@@ -548,15 +632,25 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
       } catch {
         still.push(code);
       }
-      await new Promise((r) => setTimeout(r, 400));
+      // 여기도 사람당 한 요청이다. 갤로그만큼 많지는 않지만(후보는 maxPerRun으로
+      // 막혀 있다) 간격이 일정한 건 마찬가지라 흔들어 준다.
+      await new Promise((r) => setTimeout(r, jitter(400)));
     }
     failed = still;
   }
 
-  let msg = failed.length
-    ? `${verified.length}건 확인됨, ${failed.length}건 실패: ${failed.slice(0, 10).join(", ")}`
-      + (failed.length > 10 ? ` 외 ${failed.length - 10}건` : "")
-    : `${verified.length}건 모두 ${want} 차단 확인됨.`;
+  // 한 명도 못 보낸 경우(첫 묶음부터 한도에 걸림)에 "0건 모두 확인됨"이라고
+  // 하면 안 된다. 아무 일도 안 일어났는데 성공한 것처럼 읽힌다.
+  // 2026-09-08 주딱 계정 실제 실행에서 이 문구가 나왔다.
+  let msg;
+  if (!attempted.length) {
+    msg = `한 명도 보내지 못했습니다.`;
+  } else if (failed.length) {
+    msg = `${verified.length}건 확인됨, ${failed.length}건 실패: ${failed.slice(0, 10).join(", ")}`
+      + (failed.length > 10 ? ` 외 ${failed.length - 10}건` : "");
+  } else {
+    msg = `${verified.length}건 모두 ${want} 차단 확인됨.`;
+  }
   if (limitHit) {
     msg += ` / 하루 차단 한도로 ${notSent.length}명은 보내지 못했습니다.`;
   }
@@ -769,7 +863,9 @@ export async function collectActivity(galleryId, maxPages, onProgress, untilDate
 
     if (until && rows[rows.length - 1].day < until) { reachedDate = true; break; }
     if (page === maxPages) { more = true; break; }
-    await new Promise((r) => setTimeout(r, delay));
+    // 간격을 흔든다. 갤로그만큼 요청이 많진 않지만 수천 페이지를 훑을 수 있어
+    // 총량은 더 클 수도 있다. 일정한 간격 자체가 신호다(5-5절).
+    await new Promise((r) => setTimeout(r, jitter(delay)));
   }
   return { lastPost, pages, scanned, missed, oldest, more, repeated, reachedDate };
 }
@@ -798,15 +894,24 @@ const GALLOG_URL = "https://gallog.dcinside.com";
 // 이 페이지를 열고 있었고, 지금까지 주소만 보고 본문을 버리고 있었다.
 //
 // 클래스 하나에 매달리지 않도록 tit/num 둘 다 느슨하게 잡는다.
+// ⚠ 숫자에 천 단위 쉼표가 붙는다. 2026-09-08 실제 확인:
+//     게시글(4,972)   댓글(9,288)     ← 활동 많은 계정
+//     게시글(37)      댓글(91)        ← 적은 계정
+// v1.6.4까지 \((\d+)\) 였어서 1,000을 넘는 순간 못 읽었다. 그런데 같은 화면의
+// 스크랩(0)·방명록(14)은 잡혀서, 겉으로는 "화면 구조가 바뀐 것 같다"로만 보였다.
+// 파딱 갤(t1win)처럼 큰 갤은 활동량 많은 사람이 대부분이라 이쪽이 다수다.
+// 2026-09-08 갤로그 점검에서 300명 중 258명이 실패한 원인의 상당 부분이 이것이다.
+// (그날은 IP 차단도 같이 났다. 두 가지가 겹쳐 있었다. 5-5절)
 const RE_GALLOG_COUNT =
-  /class="[^"]*\btit\b[^"]*"[^>]*>\s*([^<]+?)\s*<span[^>]*class="[^"]*\bnum\b[^"]*"[^>]*>\s*\((\d+)\)/gi;
+  /class="[^"]*\btit\b[^"]*"[^>]*>\s*([^<]+?)\s*<span[^>]*class="[^"]*\bnum\b[^"]*"[^>]*>\s*\(([\d,]+)\)/gi;
 
 // 못 읽으면 null을 준다. 0으로 읽어서 '활동 없음'이라 하면 조용한 실패가 된다.
 export function parseGallogCounts(html) {
   const found = {};
   for (const m of (html || "").matchAll(RE_GALLOG_COUNT)) {
     const label = m[1];
-    const n = Number(m[2]);
+    const n = Number(m[2].replace(/,/g, ""));
+    if (!Number.isFinite(n)) continue;
     if (label.includes("게시글")) found.posts = n;
     else if (label.includes("댓글")) found.comments = n;
     else if (label.includes("스크랩")) found.scraps = n;
@@ -836,7 +941,12 @@ export function parseGallogCounts(html) {
 // 명단에서 지워지는 걸 막는 마지막 안전장치다.
 const RE_GALLOG_DELETED = /_error\/deleted|삭제된\s*갤로그/;
 
-// { state, counts } 를 돌려준다. counts 는 alive 일 때만, 그것도 읽혔을 때만 있다.
+// { state, counts, bytes } 를 돌려준다. counts 는 alive 일 때만, 그것도 읽혔을 때만.
+//
+// bytes(본문 길이)를 같이 주는 이유: 숫자를 못 읽었을 때 원인이 두 가지인데
+// 겉보기가 같다. 화면 구조가 바뀐 것과, 디시가 우리를 막아 빈 응답을 주는 것.
+// 앞의 것은 본문이 멀쩡히 길고, 뒤의 것은 대개 짧거나 비어 있다.
+// 2026-09-08 사고 때 확장이 뒤의 것을 앞의 것으로 잘못 보고했다.
 export async function checkGallog(code) {
   try {
     const res = await fetch(`${GALLOG_URL}/${encodeURIComponent(code)}`, {
@@ -845,16 +955,17 @@ export async function checkGallog(code) {
 
     let body = "";
     try { body = await res.text(); } catch { /* 본문을 못 읽어도 아래에서 판단은 한다 */ }
+    const bytes = body.length;
 
     // 주소가 실제로 바뀌어 오는 경우와, 스크립트로 바꾸라는 본문이 오는 경우 둘 다.
     if (/\/_error\/deleted/.test(res.url || "") || RE_GALLOG_DELETED.test(body)) {
-      return { state: "deleted", counts: null };
+      return { state: "deleted", counts: null, bytes };
     }
-    if (res.status === 404) return { state: "notfound", counts: null };
-    if (!res.ok) return { state: "other", counts: null };
-    return { state: "alive", counts: parseGallogCounts(body) };
+    if (res.status === 404) return { state: "notfound", counts: null, bytes };
+    if (!res.ok) return { state: "other", counts: null, bytes };
+    return { state: "alive", counts: parseGallogCounts(body), bytes };
   } catch {
-    return { state: "error", counts: null };
+    return { state: "error", counts: null, bytes: 0 };
   }
 }
 

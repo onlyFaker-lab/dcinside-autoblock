@@ -6,7 +6,8 @@
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
   collectActivity, checkGallog,
-  isBusy, localDateKey,
+  isBusy, localDateKey, jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK,
+  rowHealth, carryOver,
 } from "./dc.js";
 
 const DEFAULTS = {
@@ -22,7 +23,8 @@ const DEFAULTS = {
 // MV3 서비스워커는 작업 도중에도 종료될 수 있다. 그러면 busy가 true인 채 남아
 // 이후 알람 틱이 전부 되돌아가고 팝업 버튼도 굳는다. 확장이 조용히 멈추는 것이다.
 // 그래서 시작 시각을 같이 적어두고, 이 시간을 넘긴 잠금은 없는 것으로 본다.
-// (300명 조회가 400ms 간격이라 2분대. 30분이면 정상 작업이 걸릴 일은 없다)
+// (300명 조회가 1.2초 간격이라 조회 시간까지 9분대. 30분이면 여유가 있다.
+//  조회 인원 상한을 1000명 넘게 올리면 이 여유가 사라진다 — 아래 touchBusy가 받쳐준다)
 
 // 30분이 넘는 정상 작업도 있을 수 있다(조회 인원을 크게 잡은 경우).
 // 그대로 두면 작업 도중에 잠금이 만료돼 두 번째 실행이 겹친다. 살아 있다고 알린다.
@@ -133,8 +135,11 @@ async function runCheck({ auto = false } = {}) {
     await log(`  (마지막 확인 기준. 가장 이른 만료까지 약 ${hours}시간)`);
     await log(`  손으로 해제하셨다면 명단 탭의 '전체 다시 확인'을 눌러주세요.`);
     await setStatus("이상 없음", false);
-    await chrome.storage.local.set({ candidates: [], lastCheck: now });
-    return { ok: true, candidates: [] };
+    // 후보를 지우지 않는다. 하루 한도에 걸려 남겨둔 사람이 여기서 조용히
+    // 사라지곤 했다. 조회를 안 했으면 판정이 바뀔 이유도 없다.
+    await chrome.storage.local.set({ lastCheck: now });
+    const { candidates: kept = [] } = await chrome.storage.local.get("candidates");
+    return { ok: true, candidates: kept };
   }
 
   await setStatus("차단 목록 확인 중...", true);
@@ -144,7 +149,10 @@ async function runCheck({ auto = false } = {}) {
     (due.length > cap ? ` — ${due.length}명 중 ${cap}명, 나머지는 다음 차례에` : "")
   );
   if (targets.length > 60) {
-    const mins = Math.ceil((targets.length * 1.2) / 60);
+    // 1.2를 리터럴로 적어두면 간격을 고칠 때 같이 안 고쳐진다. 실제로 이 줄은
+    // 간격이 400ms인데 갤로그의 1.2초로 계산하고 있어서 3배 부풀려 있었다.
+    // 난수는 평균이 base라 간격이 그대로 예상 시간이 된다(조회 시간은 그 위에 붙는다).
+    const mins = Math.ceil((targets.length * (CHECK_DELAY_MS / 1000)) / 60);
     await log(`  (${mins}분쯤 걸립니다. 창을 닫아도 계속 진행됩니다)`);
   }
 
@@ -152,7 +160,9 @@ async function runCheck({ auto = false } = {}) {
   const manual = [];
   const updates = new Map();     // code → 갱신할 값
   let retired = 0;
-  let parseFailures = 0;
+  let parseFailures = 0;   // 표에 있는 행을 못 읽음
+  let stateFailures = 0;   // 차단/해제 칸을 못 읽음
+  let idFailures = 0;      // 식별자를 못 읽음
 
   try {
     for (let i = 0; i < targets.length; i++) {
@@ -160,16 +170,28 @@ async function runCheck({ auto = false } = {}) {
       const rows = await fetchRowsForCode(settings.galleryId, entry.value);
       const result = analyzeCode(rows, entry.value, entry);
 
-      // 식별자를 못 읽었거나, 차단/해제 상태를 못 읽은 행. 후자를 빼먹으면
-      // 해제된 사람이 전원 '차단 중'으로 보이는데 경고가 안 뜬다.
-      const unparsed = rows.filter((r) => !r.identity || r.stateUnknown).length;
-      if (unparsed) {
-        await log(`  [경고] ${entry.value}: ${unparsed}개 행의 식별자를 읽지 못했습니다.`);
+      // 행 수 대조만으로는 부족하다. 표는 멀쩡히 읽었는데 칸 하나가 안 읽히면
+      // missedRows가 0이라 아무 경고도 안 뜬다. v1.5.2에서 실제로 그렇게 멈췄다.
+      const health = rowHealth(rows);
+
+      // 상태 칸을 못 읽으면 released가 전부 false가 되어 해제된 사람이
+      // '차단 중'으로 보인다. 후보가 0건인데 화면은 조용한, 최악의 실패다.
+      if (health.badState) {
+        stateFailures++;
+        await log(
+          `  [경고] ${entry.value}: ${health.badState}개 행의 차단/해제 칸을 읽지 못했습니다. ` +
+          `해제된 사람이 '차단 중'으로 보일 수 있습니다.`
+        );
+      }
+      // 식별자를 못 읽은 행은 analyzeCode가 남의 것으로 보고 버린다.
+      if (health.badIdentity) {
+        idFailures++;
+        await log(`  [경고] ${entry.value}: ${health.badIdentity}개 행의 식별자를 읽지 못했습니다.`);
       }
       // 표에는 행이 있는데 우리가 못 읽은 경우. 마크업이 바뀌면 여기가 먼저 운다.
       // 이걸 안 보면 "이력 없음"으로 조용히 넘어가고, 아무도 안 막힌 채
       // 60일 뒤 명단이 자동 중지된다.
-      if (rows.missedRows) {
+      if (health.missed) {
         parseFailures++;
         await log(
           `  [경고] ${entry.value}: 표에 ${rows.expectedRows}행이 있는데 ` +
@@ -211,7 +233,8 @@ async function runCheck({ auto = false } = {}) {
         await log(`  [${i + 1}/${targets.length}] ${entry.value}: ${rows.length}건 조회 — ${verdict}`);
       }
 
-      await new Promise((r) => setTimeout(r, 400));   // 서버 부담 최소화
+      // 400ms 고정이었다. 일정한 간격 자체가 사람이 만들 수 없는 신호다.
+      await new Promise((r) => setTimeout(r, jitter(CHECK_DELAY_MS)));
     }
   } catch (e) {
     await log(`[오류] ${e.message}`);
@@ -221,43 +244,93 @@ async function runCheck({ auto = false } = {}) {
   }
 
   await saveWatchlistUpdates(updates);
-  await chrome.storage.local.set({ candidates, manual, lastCheck: now });
 
-  if (parseFailures) {
-    await log(
-      `[경고] ${parseFailures}명의 조회에서 표를 제대로 읽지 못했습니다. ` +
-      `판정 결과를 믿지 마시고, 관리 화면에서 직접 확인해 주세요.`
-    );
+  // 이번에 조회한 사람만 결과를 갈아끼운다. 안 본 사람의 옛 판정은 남긴다.
+  //
+  // 이게 없으면 '완장이 직접 해제' 목록이 한 번 더 확인할 때 통째로 사라진다.
+  // manual 판정은 nextCheckAt이 7일 뒤라 다음 조회 대상에서 빠지는데,
+  // 그대로 덮어쓰면 빈 배열이 되어 '명단에서 빼기' 버튼까지 같이 없어진다.
+  // 사용자는 아무 안내도 못 받고 목록만 비는 것을 본다.
+  //
+  // 후보도 마찬가지다. 하루 차단 한도에 걸려 못 보낸 사람을 후보에 남겨뒀는데,
+  // 그 뒤 조회 한 번이면 그 사람들이 조용히 사라진다.
+  const checkedNow = new Set(targets.map((t) => t.value));
+  const stillWatched = new Set(
+    watchlist.filter((t) => t.enabled !== false).map((t) => t.value)
+  );
+  const prev = await chrome.storage.local.get(["candidates", "manual"]);
+  const keep = (list) => carryOver(list, checkedNow, stillWatched);
+
+  const allCandidates = [...candidates, ...keep(prev.candidates)];
+  const allManual = [...manual, ...keep(prev.manual)];
+  const carried = allCandidates.length - candidates.length;
+
+  await chrome.storage.local.set({
+    candidates: allCandidates,
+    manual: allManual,
+    lastCheck: now,
+  });
+
+  // 셋 중 하나라도 있으면 이번 판정을 믿으면 안 된다.
+  // 특히 후보가 0건일 때가 위험하다. 아무 일도 안 일어난 것과 구별이 안 된다.
+  const brokenChecks = parseFailures + stateFailures + idFailures;
+  if (brokenChecks) {
+    if (parseFailures) {
+      await log(`[경고] ${parseFailures}명의 조회에서 표의 행을 다 읽지 못했습니다.`);
+    }
+    if (stateFailures) {
+      await log(
+        `[경고] ${stateFailures}명의 조회에서 차단/해제 상태를 읽지 못했습니다. ` +
+        `후보가 0건으로 나와도 그대로 믿지 마세요.`
+      );
+    }
+    if (idFailures) {
+      await log(`[경고] ${idFailures}명의 조회에서 식별자를 읽지 못했습니다.`);
+    }
+    await log(`  디시 화면 구조가 바뀐 것 같습니다. 관리 화면에서 직접 확인해 주세요.`);
     notify(
       "차단 목록을 읽지 못했습니다",
-      `${parseFailures}건에서 표 구조가 예상과 다릅니다. 결과를 믿지 마세요.`
+      `${brokenChecks}건에서 표 구조가 예상과 다릅니다. 결과를 믿지 마세요.`
     );
   }
   if (retired) {
     await log(`[안내] ${retired}명은 60일간 기록이 없어 자동으로 중지했습니다.`);
   }
-  if (manual.length) {
+  if (allManual.length) {
     await log(
-      `[안내] ${manual.length}명은 차단 기간이 남았는데 해제돼 있습니다. ` +
+      `[안내] ${allManual.length}명은 차단 기간이 남았는데 해제돼 있습니다. ` +
       `완장이 직접 풀어준 것으로 보여 재차단하지 않았습니다.`
     );
   }
+  if (carried) {
+    await log(`[안내] 이번에 조회하지 않은 후보 ${carried}명은 목록에 그대로 뒀습니다.`);
+  }
 
-  if (candidates.length) {
-    await log(`재차단 후보 ${candidates.length}건을 찾았습니다.`);
-    await setStatus(`후보 ${candidates.length}건 — 확인 후 실행하세요`, false);
-    if (settings.notify) {
+  if (allCandidates.length) {
+    await log(
+      `재차단 후보 ${allCandidates.length}건입니다` +
+      (carried ? ` (이번에 새로 찾은 것 ${candidates.length}건)` : "") + "."
+    );
+    await setStatus(`후보 ${allCandidates.length}건 — 확인 후 실행하세요`, false);
+    if (settings.notify && candidates.length) {
       notify("재차단 후보 발견", `${candidates.length}명의 차단이 풀렸습니다.`);
     }
     if (auto && settings.autoApply) {
-      await log("자동 실행이 켜져 있어 바로 재차단합니다.");
-      return await runApply();
+      // 표를 제대로 못 읽은 조회가 섞여 있으면 후보 목록도 못 믿는다.
+      // 그 상태로 자동 실행하면 잘못 읽은 판정으로 사람을 막게 된다.
+      if (brokenChecks) {
+        await log("[중단] 목록을 제대로 읽지 못한 조회가 있어 자동 실행을 건너뜁니다.");
+        await log("  화면에서 후보를 확인한 뒤 직접 실행해 주세요.");
+      } else {
+        await log("자동 실행이 켜져 있어 바로 재차단합니다.");
+        return await runApply();
+      }
     }
   } else {
     await log("재차단할 대상이 없습니다.");
-    await setStatus(parseFailures ? "경고 — 목록을 읽지 못함" : "이상 없음", false);
+    await setStatus(brokenChecks ? "경고 — 목록을 읽지 못함" : "이상 없음", false);
   }
-  return { ok: true, candidates, parseFailures };
+  return { ok: true, candidates: allCandidates, parseFailures, stateFailures, idFailures };
 }
 
 // --------------------------------------------------------------- 실행
@@ -363,7 +436,15 @@ async function runApply() {
     candidates: remaining,
   });
 
-  if (okCount === records.length) {
+  if (!records.length) {
+    // 한 명도 못 보낸 경우. '완료: 0/0건 확인'은 성공처럼 읽힌다.
+    // 후보는 그대로 남아 있으므로 그 사실을 말해준다.
+    await log(`재차단된 사람이 없습니다. 후보 ${remaining.length}명은 그대로 남아 있습니다.`);
+    await setStatus(
+      limitHit ? `하루 한도 — 후보 ${remaining.length}명 대기` : "재차단 없음",
+      false
+    );
+  } else if (okCount === records.length) {
     await log(`완료: ${okCount}/${records.length}건 확인`);
     await setStatus(`재차단 ${okCount}건 완료`, false);
   } else {
@@ -385,7 +466,7 @@ async function runRecheckAll() {
 
 // --------------------------------------------------------------- 명단 채우기
 
-async function runScan(pages = 10, untilDate = "") {
+async function runScan(pages = 10, untilDate = "", includeReleased = false) {
   const { settings, watchlist, status } = await getState();
   if (!settings.galleryId) {
     await log("갤러리 ID가 설정되지 않았습니다.");
@@ -413,7 +494,7 @@ async function runScan(pages = 10, untilDate = "") {
     // 페이지가 많으면 기록이 진행 표시로만 가득 차 버린다(기록은 200줄만 남는다).
     const step = pages > 50 ? 25 : 3;
     let ticks = 0;
-    const { items, pages: read, more, missed, repeated, scanned, reachedDate, oldest } =
+    const { items, releasedSkipped, pages: read, more, missed, repeated, scanned, reachedDate, oldest } =
       await collectByDuration(
         settings.galleryId, "31일", pages,
         async (page, found, atDate) => {
@@ -423,7 +504,7 @@ async function runScan(pages = 10, untilDate = "") {
             await log(`  ${page}페이지째 (${atDate}), ${found}명 발견`);
           }
         },
-        untilDate
+        untilDate, includeReleased
       );
 
     await log(`  ${read}페이지에서 차단 이력 ${scanned}행을 읽었습니다.`);
@@ -449,7 +530,14 @@ async function runScan(pages = 10, untilDate = "") {
     const known = new Set(watchlist.map((t) => t.value));
     const fresh = items.filter((i) => !known.has(i.code));
 
-    await chrome.storage.local.set({ imports: fresh });
+    await chrome.storage.local.set({ imports: fresh, importsAt: Date.now() });
+    // 걸러낸 사람 수를 말해준다. 말없이 줄어들면 그것도 조용한 실패다.
+    if (releasedSkipped) {
+      await log(
+        `  이미 차단이 해제된 ${releasedSkipped}명은 뺐습니다. ` +
+        `필요하면 '이미 해제된 사람도 보기'를 켜고 다시 불러오세요.`
+      );
+    }
     await log(
       `${read}페이지에서 31일 차단 ${items.length}명 발견, ` +
       `그중 명단에 없는 사람 ${fresh.length}명.` +
@@ -618,42 +706,74 @@ async function runActivity(months = 3, maxPages = 2000) {
   }
 }
 
-async function runGallog(limit = 300) {
+// 갤로그 점검은 한 명당 한 요청이라 이 확장에서 가장 위험한 경로다.
+// 2026-09-08에 300명 × 400ms 고정 간격으로 돌린 직후 파딱 계정의 IP가 막혔다.
+// 그래서 세 가지를 바꿨다.
+//   1. 간격을 1200ms로 늘리고 난수로 흔든다 (일정한 간격 자체가 신호다)
+//   2. 기본 인원을 50명으로 줄인다. 오래된 사람부터 도니 며칠에 걸쳐 다 돈다
+//   3. 연속으로 실패하면 즉시 멈춘다. 이미 막힌 뒤에 계속 두드리지 않는다
+async function runGallog(limit = 50) {
   const { watchlist, status } = await getState();
   if (isBusy(status)) {
     await log("이미 다른 작업이 돌고 있습니다.");
     return { ok: false };
   }
 
-  // 오래 확인 안 한 사람부터. 이미 탈퇴로 확인된 사람은 다시 안 본다.
-  const targets = watchlist
-    .filter((t) => t.kind === "code" && t.gallogState !== "deleted")
-    .sort((a, b) => (a.gallogCheckedAt || 0) - (b.gallogCheckedAt || 0))
+  const now = Date.now();
+  // 방금 확인한 사람을 또 두드리지 않는다. 실수로 두 번 눌러도 부담이 안 생긴다.
+  // 하루 한 번 도는 평소 사용에는 걸리지 않는 간격이다.
+  const RECHECK_GAP_MS = 12 * 3600 * 1000;
+
+  // 이미 탈퇴로 확인된 사람은 다시 안 본다.
+  const eligible = watchlist.filter((t) => t.kind === "code" && t.gallogState !== "deleted");
+  const fresh = eligible.filter((t) => now - (t.gallogCheckedAt || 0) < RECHECK_GAP_MS);
+
+  // 숫자를 한 번도 못 읽은 사람이 먼저다. gallogCountedAt은 성공했을 때만 찍힌다.
+  // gallogCheckedAt으로 정렬하면 실패한 사람도 '방금 봤다'고 처리돼 뒤로 밀린다.
+  const targets = eligible
+    .filter((t) => now - (t.gallogCheckedAt || 0) >= RECHECK_GAP_MS)
+    .sort((a, b) => (a.gallogCountedAt || 0) - (b.gallogCountedAt || 0))
     .slice(0, limit);
 
   if (!targets.length) {
-    await log("갤로그를 확인할 대상이 없습니다.");
+    if (fresh.length) {
+      await log(`갤로그를 확인할 대상이 없습니다. ${fresh.length}명은 12시간 안에 이미 확인했습니다.`);
+    } else {
+      await log("갤로그를 확인할 대상이 없습니다.");
+    }
     return { ok: true, checked: 0 };
   }
 
+  // 인원이 적으면 몇 초다. Math.ceil로 분만 쓰면 2명짜리도 '1분'이 되어
+  // 안내가 실제와 안 맞는다(2026-09-08 실제로 3초 걸린 작업에 1분이라고 했다).
+  const secs = Math.round((targets.length * GALLOG_DELAY_MS) / 1000);
+  const eta = secs < 60 ? `${secs}초` : `${Math.ceil(secs / 60)}분`;
   await setStatus(`갤로그 확인 중 (0/${targets.length})`, true);
   await log(`갤로그 점검: ${targets.length}명을 확인합니다. 한 명당 한 번씩 요청합니다.`);
   await log(`  글·댓글 수도 같이 기록합니다. 다음 점검 때와 비교해 변동이 없으면 알려줍니다.`);
+  await log(`  ${eta}쯤 걸립니다. 디시가 IP를 막지 않도록 일부러 천천히 돕니다.`);
+  if (fresh.length) {
+    await log(`  (12시간 안에 확인한 ${fresh.length}명은 건너뜁니다)`);
+  }
 
   const tally = { deleted: 0, notfound: 0, alive: 0, other: 0, error: 0 };
-  const now = Date.now();
   let counted = 0, uncounted = 0;
+  let streak = 0, aborted = false, lastBytes = 0;
+  let done = 0;
 
   try {
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
-      const { state, counts } = await checkGallog(t.value);
+      const { state, counts, bytes } = await checkGallog(t.value);
+      done++;
       t.gallogState = state;
       t.gallogCheckedAt = now;
       tally[state] = (tally[state] || 0) + 1;
 
       if (counts) {
         counted++;
+        streak = 0;
+        t.gallogCountedAt = now;
         t.gallogPosts = counts.posts;
         t.gallogComments = counts.comments;
         // 숫자가 그대로면 gallogSince를 건드리지 않는다. 그래야 '언제부터
@@ -665,40 +785,83 @@ async function runGallog(limit = 300) {
         }
       } else if (state === "alive") {
         uncounted++;
+        streak++;
+        lastBytes = bytes;
+      } else if (state === "error" || state === "other") {
+        // 응답 자체가 안 오는 것도 막혔다는 신호다.
+        streak++;
+        lastBytes = bytes;
+      } else {
+        streak = 0;   // deleted/notfound 는 정상적인 결과다
+      }
+
+      // 이미 막혔는데 계속 두드리면 차단만 길어진다. 실제 사고 때 258번을 더 보냈다.
+      if (streak >= GALLOG_FAIL_STREAK) {
+        aborted = true;
+        break;
       }
 
       if ((i + 1) % 10 === 0) {
         await touchBusy();
         await setStatus(`갤로그 확인 중 (${i + 1}/${targets.length})`, true);
       }
-      if (i + 1 < targets.length) await new Promise((r) => setTimeout(r, 400));
+      if (i + 1 < targets.length) {
+        await new Promise((r) => setTimeout(r, jitter(GALLOG_DELAY_MS)));
+      }
     }
     await chrome.storage.local.set({ watchlist });
 
     await log(
-      `  탈퇴 ${tally.deleted}명, 코드 확인 필요 ${tally.notfound}명, ` +
+      `  ${done}명 확인 — 탈퇴 ${tally.deleted}명, 코드 확인 필요 ${tally.notfound}명, ` +
       `정상 ${tally.alive}명, 판단 불가 ${tally.other + tally.error}명`
     );
     if (counted) {
       await log(`  ${counted}명의 글·댓글 수를 기록했습니다.`);
     }
-    if (uncounted) {
+
+    if (aborted) {
+      // 여기가 핵심이다. 예전에는 이 상황을 '화면 구조가 바뀐 것 같다'고만 말했다.
+      // 실제 원인은 IP 차단이었고, 엉뚱한 곳을 고치러 갈 뻔했다.
+      await log(`  [중단] ${GALLOG_FAIL_STREAK}명 연속으로 갤로그를 읽지 못해 멈췄습니다.`);
+      await log(`  마지막 응답 본문이 ${lastBytes}바이트였습니다.`);
+      if (lastBytes < 500) {
+        await log(`  본문이 거의 비어 있습니다. 디시가 접속을 막았을 가능성이 큽니다.`);
+        await log(`  브라우저로 gall.dcinside.com 에 들어가 보세요. 하얀 화면이면 IP 차단입니다.`);
+        await log(`  30분쯤 기다리거나 인터넷 연결(IP)을 바꾸면 풀립니다. 남은 사람은 다음에 이어서 봅니다.`);
+      } else {
+        await log(`  본문은 정상 길이입니다. 갤로그 화면 구조가 바뀌었을 수 있습니다.`);
+        await log(`  갤로그를 열어 F12로 게시글·댓글 수 부분의 HTML을 떠서 알려주세요.`);
+      }
+      notify(
+        "갤로그 점검을 중단했습니다",
+        lastBytes < 500
+          ? "디시가 접속을 막은 것 같습니다. 기록 창을 확인하세요."
+          : "갤로그를 읽지 못했습니다. 기록 창을 확인하세요."
+      );
+    } else if (uncounted) {
+      // 중간중간 섞여 실패한 경우. 연속이 아니라서 차단은 아닐 가능성이 크다.
       // 숫자를 못 읽었으면 0으로 두면 안 된다. 그대로 두고 눈에 보이게 남긴다.
       await log(
         `  [경고] ${uncounted}명은 갤로그가 열렸는데 글·댓글 수를 읽지 못했습니다. ` +
-        `갤로그 화면 구조가 바뀐 것 같습니다.`
+        `그 사람들의 옛 숫자는 그대로 두었습니다.`
       );
       notify("갤로그 숫자를 읽지 못했습니다", `${uncounted}명. 결과를 믿지 마세요.`);
     }
+
     if (tally.notfound) {
       await log(`  [안내] 404가 나온 코드는 자동으로 지우지 않습니다. 직접 확인해 주세요.`);
     }
-    await setStatus("대기 중", false);
+    const left = eligible.length - done - fresh.length;
+    if (left > 0) {
+      await log(`  아직 ${left}명이 남았습니다. 다음에 다시 누르면 이어서 봅니다.`);
+    }
+    await setStatus(aborted ? "갤로그 점검 중단됨" : "대기 중", false);
     if (tally.deleted) {
       notify("탈퇴한 계정을 찾았습니다", `${tally.deleted}명. 명단 정리 탭에서 확인하세요.`);
     }
-    return { ok: true, checked: targets.length, tally };
+    return { ok: !aborted, checked: done, tally, aborted };
   } catch (e) {
+    await chrome.storage.local.set({ watchlist });   // 여기까지 읽은 것은 살린다
     await log(`[오류] ${e.message}`);
     await setStatus("오류 발생", false);
     return { ok: false, error: e.message };
@@ -718,7 +881,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg.type === "check") sendResponse(await runCheck({ auto: false }));
       else if (msg.type === "apply") sendResponse(await runApply());
-      else if (msg.type === "scan") sendResponse(await runScan(msg.pages, msg.until));
+      else if (msg.type === "scan") sendResponse(await runScan(msg.pages, msg.until, msg.includeReleased));
       else if (msg.type === "recheckAll") sendResponse(await runRecheckAll());
       else if (msg.type === "activity") sendResponse(await runActivity(msg.months, msg.pages));
       else if (msg.type === "gallog") sendResponse(await runGallog(msg.limit));
