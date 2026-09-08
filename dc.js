@@ -820,18 +820,35 @@ export function parseGallogCounts(html) {
   };
 }
 
+// 2026-09-08 세 갈래 모두 실물 확인. 탈퇴와 '없는 코드'는 둘 다 404라서
+// 상태 코드로는 못 가른다. 본문 문구로만 갈린다.
+//   탈퇴한 계정 → 404 + "삭제된 갤로그입니다"
+//   없는 코드   → 404 + "404 Page Not Found"
+// 이 구분을 합치지 말 것. 코드를 잘못 읽었을 때 멀쩡한 사람이 탈퇴로 찍혀
+// 명단에서 지워지는 걸 막는 마지막 안전장치다.
+const RE_GALLOG_DELETED = /삭제된\s*갤로그/;
+
 // { state, counts } 를 돌려준다. counts 는 alive 일 때만, 그것도 읽혔을 때만 있다.
+//
+// 주소만 보면 안 된다. 브라우저에서는 /_error/deleted 로 넘어가지만 그건
+// 페이지가 자바스크립트로 주소를 바꾸는 것이고, fetch 로 받으면 원래 주소에
+// 404 만 온다. 실제로 탈퇴한 계정이 '코드 확인 필요'로 잘못 떨어졌다.
+// 그래서 본문 문구를 읽는다. 주소가 바뀌는 경우도 있을 수 있으니 둘 다 본다.
 export async function checkGallog(code) {
   try {
     const res = await fetch(`${GALLOG_URL}/${encodeURIComponent(code)}`, {
       credentials: "omit", redirect: "follow",
     });
-    if (/\/_error\/deleted/.test(res.url || "")) return { state: "deleted", counts: null };
+
+    let body = "";
+    try { body = await res.text(); } catch { /* 본문을 못 읽어도 아래에서 판단은 한다 */ }
+
+    if (/\/_error\/deleted/.test(res.url || "") || RE_GALLOG_DELETED.test(body)) {
+      return { state: "deleted", counts: null };
+    }
     if (res.status === 404) return { state: "notfound", counts: null };
     if (!res.ok) return { state: "other", counts: null };
-    let counts = null;
-    try { counts = parseGallogCounts(await res.text()); } catch { /* 본문을 못 읽어도 alive는 alive다 */ }
-    return { state: "alive", counts };
+    return { state: "alive", counts: parseGallogCounts(body) };
   } catch {
     return { state: "error", counts: null };
   }

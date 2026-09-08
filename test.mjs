@@ -544,19 +544,34 @@ console.log("\n[11] 명단 정리");
   eq("파라미터가 안 먹으면 감지", r2.repeated, true);
   eq("1페이지에서 멈춤", r2.pages, 1);
 
-  // 갤로그 (2026-09-07 실제 확인한 세 갈래)
+  // 갤로그. 2026-09-08 확인: 탈퇴한 계정은 404 + '삭제된 갤로그입니다' 본문이 온다.
+  // 브라우저 주소창은 /_error/deleted 로 바뀌지만 그건 페이지가 스크립트로
+  // 바꾸는 것이라 fetch 에는 안 잡힌다. 주소만 믿으면 탈퇴를 놓친다.
+  const DELETED_PAGE = `<div><strong>삭제된 갤로그입니다.</strong>
+    <a href="https://gallog.dcinside.com/">https://gallog.dcinside.com/식별 코드</a>
+    주소에 다른 식별 코드를 입력해주세요.</div>`;
   globalThis.fetch = async (u) => {
     if (u.includes("deadman")) {
+      // 실제로 오는 형태: 404 + 삭제 안내 본문, 주소는 그대로
+      return { ok: false, status: 404, url: u, text: async () => DELETED_PAGE };
+    }
+    // 주소가 바뀌어 오는 경우도 계속 잡아야 한다
+    if (u.includes("redirected")) {
       return { ok: true, status: 200, url: "https://gallog.dcinside.com/_error/deleted", text: async () => "" };
     }
-    if (u.includes("zzzz9999")) return { ok: false, status: 404, url: u, text: async () => "" };
+    // 없는 코드도 404지만 본문이 다르다 (2026-09-08 확인)
+    if (u.includes("zzzz9999")) {
+      return { ok: false, status: 404, url: u,
+        text: async () => "404 Page Not Found\nThe page you requested was not found." };
+    }
     if (u.includes("nocount")) {
       return { ok: true, status: 200, url: u, text: async () => "<html>갤로그입니다</html>" };
     }
     return { ok: true, status: 200, url: u, text: async () => GALLOG_HOME };
   };
   eq("살아있는 계정", (await checkGallog("apple8748")).state, "alive");
-  eq("탈퇴한 계정", (await checkGallog("deadman1234")).state, "deleted");
+  eq("탈퇴한 계정 (404 + 안내 문구)", (await checkGallog("deadman1234")).state, "deleted");
+  eq("주소가 바뀌는 경우도 탈퇴", (await checkGallog("redirected1")).state, "deleted");
   eq("없는 코드는 404", (await checkGallog("zzzz9999")).state, "notfound");
   // 비공개는 정상 응답이라 alive로 나온다. 그래야 멀쩡한 사람이 안 지워진다.
   eq("비공개도 alive", (await checkGallog("secret0001")).state, "alive");
@@ -564,6 +579,11 @@ console.log("\n[11] 명단 정리");
   const live = await checkGallog("apple8748");
   eq("살아있으면 숫자도 같이 온다", live.counts.total, 361);
   eq("탈퇴는 숫자 없음", (await checkGallog("deadman1234")).counts, null);
+  // 본문 없이 404만 오면 그건 탈퇴가 아니라 '모르겠다'다
+  // 탈퇴와 없는 코드는 둘 다 404다. 본문으로만 갈린다.
+  eq("없는 코드는 notfound", (await checkGallog("zzzz9999")).state, "notfound");
+  ok("탈퇴와 없는 코드가 갈림",
+     (await checkGallog("deadman1234")).state !== (await checkGallog("zzzz9999")).state);
   eq("숫자 못 읽어도 alive", (await checkGallog("nocount")).state, "alive");
   eq("못 읽으면 null (0이 아니다)", (await checkGallog("nocount")).counts, null);
 
