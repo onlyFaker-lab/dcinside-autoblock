@@ -197,3 +197,6 @@ input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
   padding: 0 3px;
   border-radius: 2px;
 }
+
+/* 날짜 기준으로 훑을 때는 페이지 입력란이 쓰이지 않는다 */
+.off { opacity: .4; }

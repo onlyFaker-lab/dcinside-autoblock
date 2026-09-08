@@ -78,6 +78,61 @@ const table = (rows) => `<table class="minor_block_list">
 		</table>`;
 
 // ── 1. 실제 마크업 파싱 ──────────────────────────────────────
+// 2026-09-08 실제 갤로그 홈에서 복사한 마크업. 비로그인 + 비공개 상태다.
+// 목록은 '게시글이 없습니다'로 가려져 있는데 개수는 그대로 나온다.
+const GALLOG_HOME = `
+<div class="wrap_right">
+<section>
+  <div class="gallog_cont">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/hear9577/posting';" style="cursor:pointer">게시글<span class="num">(29)</span></h2>
+		<span class="greybox">비공개</span>
+	  </div>
+	</header>
+	<div class="cont_box">
+<div class="gallog_empty small">
+  게시글이 없습니다.
+</div>
+	</div>
+  </div>
+</section>
+<section>
+  <div class="gallog_cont comments">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/hear9577/comment';" style="cursor:pointer">댓글<span class="num">(332)</span></h2>
+		<span class="greybox">비공개</span>
+	  </div>
+	</header>
+	<div class="cont_box">
+<div class="gallog_empty small">
+  댓글이 없습니다.
+</div>
+	</div>
+  </div>
+</section>
+<section>
+  <div class="gallog_cont scraps">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/hear9577/scrap';" style="cursor:pointer">스크랩<span class="num">(2)</span></h2>
+		<span class="greybox">공개</span>
+	  </div>
+	</header>
+  </div>
+</section>
+<section>
+  <div class="gallog_cont gstbook">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/hear9577/guestbook';" style="cursor:pointer">방명록<span class="num">(1)</span></h2>
+	  </div>
+	</header>
+  </div>
+</section>
+</div>`;
+
 console.log("\n[1] 실제 관리 화면 마크업 파싱");
 {
   const rows = parseBlockList(table([
@@ -360,8 +415,10 @@ console.log("\n[10] 하루 차단 한도");
       posts++;
       if (posts >= 2) {
         // 두 번째 묶음부터 한도에 걸린 상황
+        // 2026-09-08 실제 확인한 문구
         return { ok: true, text: async () =>
-          JSON.stringify({ result: false, msg: "오늘 차단 횟수를 전부 사용했습니다." }) };
+          JSON.stringify({ result: false,
+            msg: "일일 차단 횟수가 초과되어 장시간 차단이 불가능합니다." }) };
       }
       for (const c of new URLSearchParams(opt.body).get("user_codes").split("\n")) {
         blockedNow.add(c);
@@ -378,7 +435,8 @@ console.log("\n[10] 하루 차단 한도");
 
   const r = await blockCodes("gid", codes, "음란성", 744, () => {});
   ok("한도를 알아챔", r.limitHit === true);
-  eq("디시 문구를 그대로 남김", r.limitMessage, "오늘 차단 횟수를 전부 사용했습니다.");
+  eq("디시 문구를 그대로 남김", r.limitMessage,
+     "일일 차단 횟수가 초과되어 장시간 차단이 불가능합니다.");
   ok("한도 뒤로는 안 보냄", posts === 2, `POST ${posts}회`);
   ok("보낸 사람은 확인됨", r.verified.length > 0);
   ok("못 보낸 사람이 남음", r.notSent.length > 0);
@@ -386,6 +444,39 @@ console.log("\n[10] 하루 차단 한도");
   ok("못 보낸 사람은 실패로 세지 않음", r.failed.every((c) => !r.notSent.includes(c)));
   ok("ok 는 false", r.ok === false);
   ok("안내 문구에 남은 인원", /보내지 못했습니다/.test(r.message), r.message);
+
+  delete globalThis.fetch;
+  delete globalThis.chrome;
+}
+
+console.log("\n[10-2] 한도 문구 알아보기");
+{
+  const { blockCodes } = await import("./dc.js");
+  globalThis.chrome = { cookies: { get: async () => ({ value: "T" }) } };
+
+  // 문구 하나로 한 번씩 돌려서, 한도로 보는지 아닌지만 확인한다.
+  const hit = async (msg) => {
+    globalThis.fetch = async (url, opt = {}) => {
+      if (opt.method === "POST") {
+        return { ok: true, text: async () => JSON.stringify({ result: false, msg }) };
+      }
+      return { ok: true, text: async () => table([]) };
+    };
+    const r = await blockCodes("gid", ["aaaa1111"], "음란성", 744, () => {});
+    return r.limitHit;
+  };
+
+  ok("실제 문구", await hit("일일 차단 횟수가 초과되어 장시간 차단이 불가능합니다."));
+  ok("띄어쓰기가 달라도", await hit("일일차단횟수가 초과되어 장시간차단이 불가능합니다."));
+  ok("표현이 바뀌어도", await hit("오늘 차단 횟수를 전부 사용했습니다."));
+  ok("소진 표현", await hit("금일 차단 가능 횟수가 소진되었습니다."));
+  ok("장시간 표현만 있어도", await hit("장시간 차단이 불가능합니다."));
+
+  // 한도가 아닌 응답을 한도로 착각하면, 멀쩡한 사람을 안 보내고 넘어간다.
+  ok("성공 응답은 한도 아님", !(await hit("차단되었습니다.")));
+  ok("권한 오류는 한도 아님", !(await hit("권한이 없습니다.")));
+  ok("코드 오류는 한도 아님", !(await hit("존재하지 않는 식별코드입니다.")));
+  ok("중복 안내는 한도 아님", !(await hit("중복 차단으로 기존 차단은 해제되었습니다.")));
 
   delete globalThis.fetch;
   delete globalThis.chrome;
@@ -459,15 +550,80 @@ console.log("\n[11] 명단 정리");
       return { ok: true, status: 200, url: "https://gallog.dcinside.com/_error/deleted", text: async () => "" };
     }
     if (u.includes("zzzz9999")) return { ok: false, status: 404, url: u, text: async () => "" };
-    return { ok: true, status: 200, url: u, text: async () => "<html>갤로그입니다</html>" };
+    if (u.includes("nocount")) {
+      return { ok: true, status: 200, url: u, text: async () => "<html>갤로그입니다</html>" };
+    }
+    return { ok: true, status: 200, url: u, text: async () => GALLOG_HOME };
   };
-  eq("살아있는 계정", await checkGallog("apple8748"), "alive");
-  eq("탈퇴한 계정", await checkGallog("deadman1234"), "deleted");
-  eq("없는 코드는 404", await checkGallog("zzzz9999"), "notfound");
+  eq("살아있는 계정", (await checkGallog("apple8748")).state, "alive");
+  eq("탈퇴한 계정", (await checkGallog("deadman1234")).state, "deleted");
+  eq("없는 코드는 404", (await checkGallog("zzzz9999")).state, "notfound");
   // 비공개는 정상 응답이라 alive로 나온다. 그래야 멀쩡한 사람이 안 지워진다.
-  eq("비공개도 alive", await checkGallog("secret0001"), "alive");
+  eq("비공개도 alive", (await checkGallog("secret0001")).state, "alive");
+
+  const live = await checkGallog("apple8748");
+  eq("살아있으면 숫자도 같이 온다", live.counts.total, 361);
+  eq("탈퇴는 숫자 없음", (await checkGallog("deadman1234")).counts, null);
+  eq("숫자 못 읽어도 alive", (await checkGallog("nocount")).state, "alive");
+  eq("못 읽으면 null (0이 아니다)", (await checkGallog("nocount")).counts, null);
 
   delete globalThis.fetch;
+}
+
+console.log("\n[12] 갤로그 글·댓글 수 (2026-09-08 실제 마크업)");
+{
+  const { parseGallogCounts } = await import("./dc.js");
+
+  const c = parseGallogCounts(GALLOG_HOME);
+  eq("게시글 수", c.posts, 29);
+  eq("댓글 수", c.comments, 332);
+  eq("스크랩 수", c.scraps, 2);
+  eq("합계", c.total, 361);
+  ok("방명록은 합계에 안 넣음", c.total === 29 + 332);
+
+  // 비공개여도 숫자는 읽힌다. 이게 이 기능이 성립하는 근거다.
+  ok("비공개 표시가 있는 화면", GALLOG_HOME.includes("비공개"));
+  ok("목록은 비어 있는데도 읽힘", GALLOG_HOME.includes("게시글이 없습니다"));
+
+  // 클래스가 늘어나도 읽혀야 한다
+  const extra = GALLOG_HOME
+    .replace(/class="tit"/g, 'class="tit on"')
+    .replace(/class="num"/g, 'class="num big"');
+  eq("클래스가 늘어도 읽음", parseGallogCounts(extra).total, 361);
+
+  // 못 읽으면 0이 아니라 null이어야 한다. 0으로 읽으면 조용한 실패가 된다.
+  eq("빈 화면은 null", parseGallogCounts("<html></html>"), null);
+  eq("댓글만 있으면 null", parseGallogCounts(
+    '<h2 class="tit">댓글<span class="num">(5)</span></h2>'), null);
+  eq("빈 입력도 null", parseGallogCounts(""), null);
+
+  // 왼쪽 메뉴의 '댓글' 링크를 숫자로 착각하면 안 된다
+  const menu = `<li class="comment"><a href="/x/comment">댓글</a></li>` + GALLOG_HOME;
+  eq("메뉴에 속지 않음", parseGallogCounts(menu).comments, 332);
+}
+
+// 변동 없음 판정. 숫자가 같으면 처음 본 시각을 유지하고, 바뀌면 다시 센다.
+console.log("\n[13] 갤로그 변동 추적");
+{
+  const DAY = 24 * 3600 * 1000;
+  const now = Date.now();
+  const t = {};
+  const record = (counts, at) => {
+    if (t.gallogTotal !== counts.total) { t.gallogTotal = counts.total; t.gallogSince = at; }
+  };
+
+  record({ total: 361 }, now - 100 * DAY);
+  eq("처음 기록", t.gallogSince, now - 100 * DAY);
+
+  record({ total: 361 }, now - 50 * DAY);
+  eq("같은 숫자면 시작 시각 유지", t.gallogSince, now - 100 * DAY);
+
+  record({ total: 362 }, now - 10 * DAY);
+  eq("숫자가 늘면 다시 셈", t.gallogSince, now - 10 * DAY);
+
+  record({ total: 300 }, now);
+  eq("숫자가 줄어도 변동으로 봄", t.gallogSince, now);
+  ok("줄어든 것도 활동이라 명단에 남는다", t.gallogTotal === 300);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

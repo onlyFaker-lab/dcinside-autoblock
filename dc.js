@@ -420,10 +420,25 @@ export async function collectByDuration(galleryId, durationLabel, maxPages, onPr
 }
 
 // 디시는 완장 계정마다 하루 차단 횟수에 한도를 둔다.
-// 한도에 걸리면 그 뒤 요청은 전부 헛수고이므로 즉시 멈춰야 한다.
-// 정확한 문구를 아직 못 봤으므로 넓게 잡고, 원문을 그대로 기록에 남긴다.
-// 실제 문구가 확인되면 여기를 좁히면 된다.
-const RE_DAILY_LIMIT = /(차단\s*횟수|차단\s*가능\s*횟수|일일|하루).{0,20}(모두|전부|초과|없|소진|제한)|(초과|소진).{0,10}차단\s*횟수/;
+// 한도에 걸리면 31일 차단은 전부 헛수고이므로 즉시 멈춰야 한다.
+//
+// 2026-09-08 실제 확인한 문구 (매니저 계정, 관리 화면 직접 차단 팝업의 alert):
+//   "일일 차단 횟수가 초과되어 장시간 차단이 불가능합니다."
+//
+// 두 가지가 여기서 드러났다.
+//   1. 매니저(주딱)에게도 한도가 있다. 부매니저만이라던 예전 추정은 틀렸다.
+//   2. 막히는 건 '장시간'뿐이다. 1시간과 6시간은 한도 뒤에도 걸린다.
+//      우리는 31일만 걸므로 결국 전부 막힌 것과 같다. 즉시 중단이 맞다.
+//
+// 확인된 문구를 먼저 정확히 잡고, 문구가 조금 바뀌어도 놓치지 않게 한 겹 더 둔다.
+// 놓치는 쪽이 훨씬 나쁘다. 못 알아채면 남은 인원을 전부 보내고 전부 실패로 적는다.
+const RE_DAILY_LIMIT_KNOWN = /일일\s*차단\s*횟수.{0,10}초과/;
+const RE_DAILY_LIMIT =
+  /(차단\s*횟수|차단\s*가능\s*횟수).{0,20}(초과|소진|없|제한|사용)|장시간\s*차단.{0,15}(불가|제한)|(초과|소진).{0,10}차단\s*횟수/;
+
+function isDailyLimit(said) {
+  return RE_DAILY_LIMIT_KNOWN.test(said) || RE_DAILY_LIMIT.test(said);
+}
 
 // 응답에서 사람이 읽을 문구만 뽑아낸다. JSON이면 메시지 필드를 본다.
 function serverMessage(text) {
@@ -478,11 +493,11 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
     const said = serverMessage(await res.text());
     if (said && onProgress) onProgress(`    디시 응답: ${said}`);
 
-    if (RE_DAILY_LIMIT.test(said)) {
+    if (isDailyLimit(said)) {
       limitHit = true;
       limitMessage = said;
       if (onProgress) {
-        onProgress(`  하루 차단 한도에 걸린 것 같습니다. 남은 묶음은 보내지 않습니다.`);
+        onProgress(`  하루 차단 한도에 걸렸습니다. 남은 묶음은 보내지 않습니다.`);
       }
       break;   // 더 보내봐야 전부 헛수고다
     }
@@ -768,17 +783,57 @@ export async function collectActivity(galleryId, maxPages, onProgress, untilDate
 // 명단에서 빼는 건 되돌리기 번거로우니, 확실한 것만 후보로 올린다.
 const GALLOG_URL = "https://gallog.dcinside.com";
 
+// 갤로그 홈의 글·댓글 수. 2026-09-08 실제 HTML 확인:
+//   <h2 class="tit" onclick="...">게시글<span class="num">(29)</span></h2>
+//   <h2 class="tit" onclick="...">댓글<span class="num">(332)</span></h2>
+//
+// 중요한 두 가지를 실물로 확인했다.
+//   1. 비로그인 상태에서도 숫자가 나온다.
+//   2. 비공개 갤로그도 숫자는 나온다. 목록만 '게시글이 없습니다'로 가려지고
+//      개수는 그대로다. 그래서 공개 여부와 무관하게 쓸 수 있다.
+//
+// 이 숫자가 왜 필요한가: 지금 활동 점검은 '이 갤에 쓴 글'만 본다. 댓글로만
+// 노는 사람과 다른 갤로 옮긴 사람을 못 잡는다. 갤로그 숫자는 디시 전체의
+// 글+댓글이라 그 구멍을 막는다. 요청도 안 늘어난다. 갤로그 점검이 이미
+// 이 페이지를 열고 있었고, 지금까지 주소만 보고 본문을 버리고 있었다.
+//
+// 클래스 하나에 매달리지 않도록 tit/num 둘 다 느슨하게 잡는다.
+const RE_GALLOG_COUNT =
+  /class="[^"]*\btit\b[^"]*"[^>]*>\s*([^<]+?)\s*<span[^>]*class="[^"]*\bnum\b[^"]*"[^>]*>\s*\((\d+)\)/gi;
+
+// 못 읽으면 null을 준다. 0으로 읽어서 '활동 없음'이라 하면 조용한 실패가 된다.
+export function parseGallogCounts(html) {
+  const found = {};
+  for (const m of (html || "").matchAll(RE_GALLOG_COUNT)) {
+    const label = m[1];
+    const n = Number(m[2]);
+    if (label.includes("게시글")) found.posts = n;
+    else if (label.includes("댓글")) found.comments = n;
+    else if (label.includes("스크랩")) found.scraps = n;
+  }
+  if (found.posts === undefined || found.comments === undefined) return null;
+  return {
+    posts: found.posts,
+    comments: found.comments,
+    scraps: found.scraps ?? 0,
+    total: found.posts + found.comments,
+  };
+}
+
+// { state, counts } 를 돌려준다. counts 는 alive 일 때만, 그것도 읽혔을 때만 있다.
 export async function checkGallog(code) {
   try {
     const res = await fetch(`${GALLOG_URL}/${encodeURIComponent(code)}`, {
       credentials: "omit", redirect: "follow",
     });
-    if (/\/_error\/deleted/.test(res.url || "")) return "deleted";
-    if (res.status === 404) return "notfound";
-    if (!res.ok) return "other";
-    return "alive";
+    if (/\/_error\/deleted/.test(res.url || "")) return { state: "deleted", counts: null };
+    if (res.status === 404) return { state: "notfound", counts: null };
+    if (!res.ok) return { state: "other", counts: null };
+    let counts = null;
+    try { counts = parseGallogCounts(await res.text()); } catch { /* 본문을 못 읽어도 alive는 alive다 */ }
+    return { state: "alive", counts };
   } catch {
-    return "error";
+    return { state: "error", counts: null };
   }
 }
 

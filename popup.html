@@ -120,7 +120,7 @@
   <section id="tab-scan" class="panel">
     <div class="addrow">
       <button id="btnScan" class="primary">31일 차단 불러오기</button>
-      <label class="inline muted small">
+      <label id="scanPagesLabel" class="inline muted small">
         최대
         <input id="scanPages" type="number" min="1" max="3000" value="10" style="width:70px">
         페이지
@@ -131,6 +131,7 @@
         <input id="scanUntil" type="date" style="width:135px">
       </label>
 </div>
+    <p id="scanMode" class="muted small"></p>
     <p class="muted small">
       차단 목록에서 31일 차단을 최근 것부터 모아옵니다. 이미 명단에 있는 사람과
       IP 차단은 빼고 보여줍니다. 재차단 사유는 원래 걸었던 사유를 그대로 씁니다.
@@ -186,16 +187,23 @@
         <input id="cleanLimit" type="number" min="10" max="2000" value="300" style="width:70px">
         명씩
       </label>
-      <button id="btnGallog">갤로그 점검 (탈퇴 계정 찾기)</button>
+      <button id="btnGallog">갤로그 점검</button>
       <span class="muted small">한 명당 요청 한 번이라 느립니다.</span>
     </div>
+    <p class="muted small">
+      갤로그 점검은 탈퇴 계정을 찾고, 동시에 그 사람의 <b>디시 전체 글·댓글 수</b>를
+      기록합니다. 다음에 다시 점검했을 때 숫자가 그대로면 그동안 디시에서 아무것도
+      안 한 것입니다. 위에서 고른 기간만큼 숫자가 그대로면 아래 목록에 올라옵니다.
+      <b>첫 점검에서는 비교할 대상이 없어 아무것도 나오지 않습니다.</b>
+      한 번 더 돌려야 뜻이 생깁니다.
+    </p>
 
     <table>
       <thead>
         <tr>
           <th style="width:28px"><input type="checkbox" id="cleanAll"></th>
-          <th>닉네임</th><th>식별 코드</th><th>사유</th>
-          <th>최근 글</th><th>갤로그</th>
+          <th>메모</th><th>식별 코드</th><th>사유</th>
+          <th>이 갤 최근 글</th><th>갤로그</th><th>갤로그 활동</th>
         </tr>
       </thead>
       <tbody id="cleanBody"></tbody>

@@ -342,6 +342,12 @@ async function runApply() {
     await log(
       `  ${remaining.length}명을 못 보냈습니다. 후보 목록에 그대로 남겨둡니다.`
     );
+    // 한도는 '장시간 차단'만 막는다. 1시간과 6시간은 여전히 걸린다(2026-09-08 확인).
+    // 급한 분탕은 관리 화면에서 짧게 눌러두고 내일 31일로 다시 걸면 된다.
+    await log(
+      `  한도에 걸려도 1시간·6시간 차단은 됩니다. 당장 막아야 할 사람이 있으면 ` +
+      `관리 화면에서 짧게 걸어두고 내일 다시 실행하세요.`
+    );
     await log(
       `  내일 다시 하거나, 후보 탭의 '남은 후보 복사'로 다른 완장에게 넘기세요.`
     );
@@ -394,9 +400,12 @@ async function runScan(pages = 10, untilDate = "") {
   await setStatus("31일 차단 목록을 훑는 중...", true);
   await log(
     `차단 목록에서 31일 차단을 모읍니다` +
-    (untilDate ? ` (${untilDate}까지, 최대 ${pages}페이지)` : ` (최대 ${pages}페이지)`)
+    (untilDate ? ` (${untilDate}까지)` : ` (최대 ${pages}페이지)`)
   );
-  if (pages >= 100) {
+  if (untilDate) {
+    await log(`  날짜 기준입니다. ${pages}페이지는 안전장치일 뿐이고, 보통 그 전에 멈춥니다.`);
+  }
+  if (pages >= 100 || untilDate) {
     await log(`  페이지가 많으면 몇 분에서 수십 분 걸립니다. 창을 닫아도 계속 진행됩니다.`);
   }
 
@@ -629,17 +638,34 @@ async function runGallog(limit = 300) {
 
   await setStatus(`갤로그 확인 중 (0/${targets.length})`, true);
   await log(`갤로그 점검: ${targets.length}명을 확인합니다. 한 명당 한 번씩 요청합니다.`);
+  await log(`  글·댓글 수도 같이 기록합니다. 다음 점검 때와 비교해 변동이 없으면 알려줍니다.`);
 
   const tally = { deleted: 0, notfound: 0, alive: 0, other: 0, error: 0 };
   const now = Date.now();
+  let counted = 0, uncounted = 0;
 
   try {
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
-      const state = await checkGallog(t.value);
+      const { state, counts } = await checkGallog(t.value);
       t.gallogState = state;
       t.gallogCheckedAt = now;
       tally[state] = (tally[state] || 0) + 1;
+
+      if (counts) {
+        counted++;
+        t.gallogPosts = counts.posts;
+        t.gallogComments = counts.comments;
+        // 숫자가 그대로면 gallogSince를 건드리지 않는다. 그래야 '언제부터
+        // 이 숫자였는지'가 쌓인다. 바뀌었으면 그 순간부터 다시 센다.
+        // 줄어든 것도 '변동'이다. 글을 지운 것도 활동한 흔적이니 명단에 남긴다.
+        if (t.gallogTotal !== counts.total) {
+          t.gallogTotal = counts.total;
+          t.gallogSince = now;
+        }
+      } else if (state === "alive") {
+        uncounted++;
+      }
 
       if ((i + 1) % 10 === 0) {
         await touchBusy();
@@ -653,6 +679,17 @@ async function runGallog(limit = 300) {
       `  탈퇴 ${tally.deleted}명, 코드 확인 필요 ${tally.notfound}명, ` +
       `정상 ${tally.alive}명, 판단 불가 ${tally.other + tally.error}명`
     );
+    if (counted) {
+      await log(`  ${counted}명의 글·댓글 수를 기록했습니다.`);
+    }
+    if (uncounted) {
+      // 숫자를 못 읽었으면 0으로 두면 안 된다. 그대로 두고 눈에 보이게 남긴다.
+      await log(
+        `  [경고] ${uncounted}명은 갤로그가 열렸는데 글·댓글 수를 읽지 못했습니다. ` +
+        `갤로그 화면 구조가 바뀐 것 같습니다.`
+      );
+      notify("갤로그 숫자를 읽지 못했습니다", `${uncounted}명. 결과를 믿지 마세요.`);
+    }
     if (tally.notfound) {
       await log(`  [안내] 404가 나온 코드는 자동으로 지우지 않습니다. 직접 확인해 주세요.`);
     }

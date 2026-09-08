@@ -155,6 +155,7 @@ function render() {
         t.lastPostAt ? new Date(t.lastPostAt).toLocaleDateString("sv-SE")
         : t.noPostSince ? `${esc(t.noPostSince)} 이후 글 없음` : "-"}</td>
       <td>${gallogLabel(t)}</td>
+      <td class="muted">${gallogActivity(t)}</td>
     </tr>`).join("");
   $("cleanEmpty").textContent = state.watchlist.length === 0
     ? "명단이 비어 있습니다."
@@ -166,6 +167,13 @@ function render() {
   $("cleanCount").textContent = clean.length
     ? `${clean.length}명 중 ${cleanPicked}명 선택` : "";
   $("btnCleanDel").disabled = cleanPicked === 0;
+
+  // 머리글 체크박스는 아래 행들을 따라간다. 일부만 골랐으면 중간 표시.
+  const cleanShown = Math.min(clean.length, CLEAN_LIMIT);
+  const cleanAllBox = $("cleanAll");
+  cleanAllBox.checked = cleanShown > 0 && cleanPicked === cleanShown;
+  cleanAllBox.indeterminate = cleanPicked > 0 && cleanPicked < cleanShown;
+  cleanAllBox.disabled = cleanShown === 0;
 
   const sb = $("scanBody");
   const SCAN_LIMIT = 300;
@@ -369,10 +377,33 @@ function visibleImports() {
   return state.imports.filter((it) => scanReasons.has(reasonOf(it)));
 }
 
+// 날짜를 넣었으면 그 날짜가 기준이다. 페이지 수는 안전장치로만 남긴다.
+// 예전에는 둘 다 걸려서, 날짜를 넣어도 페이지 상한(기본 10)이 먼저 걸렸다.
+// 날짜를 지정한 사람 입장에서는 왜 덜 훑었는지 알기 어렵다.
+const SCAN_PAGE_GUARD = 3000;
+
+function scanPagesToUse() {
+  return $("scanUntil").value
+    ? SCAN_PAGE_GUARD
+    : Math.max(1, Math.min(SCAN_PAGE_GUARD, Number($("scanPages").value) || 10));
+}
+
+// 날짜를 넣으면 페이지 입력란은 쓰이지 않는다. 흐리게 해서 눈에 보이게 한다.
+function syncScanInputs() {
+  const byDate = !!$("scanUntil").value;
+  $("scanPages").disabled = byDate;
+  $("scanPagesLabel").classList.toggle("off", byDate);
+  $("scanMode").textContent = byDate
+    ? "날짜 기준으로 훑습니다. 페이지 수는 쓰지 않습니다."
+    : "";
+}
+$("scanUntil").addEventListener("change", syncScanInputs);
+$("scanUntil").addEventListener("input", syncScanInputs);
+syncScanInputs();
+
 $("btnScan").addEventListener("click", () => {
-  const pages = Math.max(1, Math.min(3000, Number($("scanPages").value) || 10));
   const until = $("scanUntil").value || "";
-  chrome.runtime.sendMessage({ type: "scan", pages, until });
+  chrome.runtime.sendMessage({ type: "scan", pages: scanPagesToUse(), until });
 });
 
 // 화면을 다시 그리면 체크박스가 새로 만들어지므로 개별 요소가 아니라
@@ -440,7 +471,12 @@ $("btnCopyCand").addEventListener("click", async () => {
 
 // ── 파일로 주고받기 ─────────────────────────────────────────
 // 확장에는 서버가 없다. 완장끼리 넘기려면 사람이 파일이나 글로 옮겨야 한다.
-// 닉네임과 메모는 넣지 않는다. 공개된 자리에 올라갈 수 있는 파일이다.
+//
+// 용도가 둘이라 담는 것도 다르다.
+//   후보 내보내기 = 남에게 넘기는 것. 코드와 사유만. 갤러리에 공개로 올라갈 수 있다.
+//   명단 내보내기 = 내 백업. 메모와 사용 여부까지 담는다. 지웠다 다시 깔았을 때
+//                   메모가 통째로 날아가면 백업이라고 할 수가 없다.
+// 그래서 명단 파일에는 메모가 들어간다. 공개된 자리에 올리지 말라고 알려준다.
 const FILE_KIND = "dcblock-share";
 
 function saveFile(name, text) {
@@ -462,22 +498,37 @@ function exportItems(what, items) {
   const data = {
     kind: FILE_KIND,
     what,                       // "candidates" 또는 "watchlist"
-    formatVersion: 1,
+    formatVersion: 2,           // 2부터 명단 파일에 memo/enabled가 들어간다
     gallery: gid,
     exportedAt: new Date().toISOString(),
     count: items.length,
-    items: items.map((x) => ({ code: x.code, reason: x.reason })),
+    items,
   };
   saveFile(`dcblock-${what}-${gid}-${stamp}.json`, JSON.stringify(data, null, 2));
 }
 
 $("btnExportCand").addEventListener("click", () => {
-  exportItems("candidates", state.candidates);
+  // 공유용. 닉네임과 메모는 넣지 않는다.
+  exportItems("candidates", state.candidates.map((c) => ({
+    code: c.code, reason: c.reason,
+  })));
 });
 
 $("btnExportList").addEventListener("click", () => {
-  const items = state.watchlist.map((t) => ({ code: t.value, reason: t.reason }));
-  exportItems("watchlist", items);
+  const withMemo = state.watchlist.filter((t) => (t.memo || "").trim()).length;
+  if (withMemo && !confirm(
+    `명단 ${state.watchlist.length}명을 파일로 내보냅니다.\n\n` +
+    `이 파일에는 메모가 그대로 들어갑니다 (${withMemo}명).\n` +
+    `내 백업용이니 갤러리처럼 공개된 곳에는 올리지 마세요.\n\n` +
+    `남에게 넘길 목적이라면 후보 탭의 '후보 내보내기'를 쓰세요.\n\n계속할까요?`
+  )) return;
+
+  exportItems("watchlist", state.watchlist.map((t) => ({
+    code: t.value,
+    reason: t.reason,
+    memo: t.memo || "",
+    enabled: t.enabled !== false,
+  })));
 });
 
 $("btnPickFile").addEventListener("click", () => $("bulkFile").click());
@@ -527,15 +578,30 @@ $("bulkFile").addEventListener("change", async (e) => {
 });
 
 // JSON 파일에서 읽은 항목을 명단에 넣는다. 사유가 항목마다 다를 수 있다.
+// 메모와 사용 여부는 파일에 있을 때만 살린다(명단 백업 파일에만 들어 있다).
 async function importItems(items, exportedAt) {
   const known = new Set(state.watchlist.map((t) => t.value));
   const seen = new Set();
   const fresh = [];
+  const unknownReasons = new Map();     // 우리가 모르는 사유 → 몇 명
+
   for (const it of items) {
     const code = String(it.code || "").trim();
     if (!code || seen.has(code) || known.has(code)) continue;
     seen.add(code);
-    fresh.push({ code, reason: REASONS.includes(it.reason) ? it.reason : "음란성" });
+
+    const given = String(it.reason || "").trim();
+    const ok = REASONS.includes(given);
+    // 모르는 사유를 조용히 '음란성'으로 바꾸면, 나중에 그 사유로 재차단된다.
+    // 바꾸는 건 어쩔 수 없지만 몇 명이 그렇게 됐는지는 알려준다.
+    if (given && !ok) unknownReasons.set(given, (unknownReasons.get(given) || 0) + 1);
+
+    fresh.push({
+      code,
+      reason: ok ? given : "음란성",
+      memo: typeof it.memo === "string" ? it.memo : "",
+      enabled: it.enabled !== false,
+    });
   }
   const dup = items.length - fresh.length;
   if (!fresh.length) {
@@ -546,15 +612,20 @@ async function importItems(items, exportedAt) {
   const byReason = {};
   for (const f of fresh) byReason[f.reason] = (byReason[f.reason] || 0) + 1;
   const detail = Object.entries(byReason).map(([r, n]) => `  ${r} ${n}명`).join("\n");
+  const memos = fresh.filter((f) => f.memo).length;
+  const odd = [...unknownReasons.entries()]
+    .map(([r, n]) => `  '${r}' ${n}명`).join("\n");
 
   if (!confirm(
     `${fresh.length}명을 명단에 추가합니다.\n\n${detail}\n` +
+    (memos ? `\n메모 ${memos}건도 같이 들어갑니다.\n` : "") +
+    (odd ? `\n[주의] 모르는 사유가 있어 '음란성'으로 넣습니다:\n${odd}\n` : "") +
     (dup ? `\n(이미 있거나 중복인 ${dup}명은 건너뜁니다)\n` : "") +
     (exportedAt ? `\n파일 만든 시각: ${new Date(exportedAt).toLocaleString("ko-KR")}` : "")
   )) return;
 
-  state.watchlist.push(...fresh.map(({ code, reason }) => ({
-    kind: "code", value: code, reason, memo: "", enabled: true,
+  state.watchlist.push(...fresh.map(({ code, reason, memo, enabled }) => ({
+    kind: "code", value: code, reason, memo, enabled,
     nextCheckAt: 0, lastVerifiedAt: 0, lastSeen: 0, missingSince: 0,
   })));
   await chrome.storage.local.set({ watchlist: state.watchlist });
@@ -634,19 +705,40 @@ $("btnBulkAdd").addEventListener("click", async () => {
 //   글 없음   : 목록에 안 나옴. 댓글만 다는 사람도 여기 걸린다. 제일 약한 근거다.
 const cleanUnchecked = new Set();
 
+// 갤로그 글·댓글 수가 며칠째 그대로인지. 기록이 없으면 null.
+// 첫 점검에서는 비교할 대상이 없으므로 0일이고, 그래서 후보로 올라오지 않는다.
+// 이건 시간이 쌓여야 쓸모가 생기는 기능이다.
+const DAY = 24 * 3600 * 1000;
+function gallogQuietDays(t) {
+  if (!t.gallogSince || t.gallogTotal === undefined) return null;
+  return Math.floor((Date.now() - t.gallogSince) / DAY);
+}
+
+// '몇 개월간' 기준은 활동 점검과 같은 선택값을 쓴다. 둘 다 뜻이 같다.
+function quietCutDays() {
+  const el = document.getElementById("cleanMonths");
+  return (Number(el && el.value) || 3) * 30;
+}
+function gallogQuiet(t) {
+  const d = gallogQuietDays(t);
+  return d !== null && d >= quietCutDays();
+}
+
 function cleanRows() {
   return state.watchlist
     .map((t, i) => ({ t, i }))
     .filter(({ t }) =>
       t.kind === "code" &&
-      (t.gallogState === "deleted" || t.gallogState === "notfound" || t.noPostSince)
+      (t.gallogState === "deleted" || t.gallogState === "notfound" ||
+       gallogQuiet(t) || t.noPostSince)
     )
     .sort((a, b) => rank(a.t) - rank(b.t));
 }
 function rank(t) {
   if (t.gallogState === "deleted") return 0;
   if (t.gallogState === "notfound") return 1;
-  return 2;
+  if (gallogQuiet(t)) return 2;      // 디시 전체에서 글·댓글이 안 늘었다
+  return 3;                          // 이 갤에 글이 없을 뿐. 가장 약한 근거
 }
 function gallogLabel(t) {
   if (t.gallogState === "deleted") return `<span class="bad">탈퇴</span>`;
@@ -654,6 +746,16 @@ function gallogLabel(t) {
   if (t.gallogState === "alive") return `<span class="muted">정상</span>`;
   if (t.gallogState) return `<span class="muted">판단 불가</span>`;
   return `<span class="muted">-</span>`;
+}
+
+// 갤로그 글·댓글 수와, 그 숫자가 며칠째 그대로인지.
+function gallogActivity(t) {
+  if (t.gallogTotal === undefined) return "-";
+  const nums = `글 ${t.gallogPosts ?? "?"} / 댓 ${t.gallogComments ?? "?"}`;
+  const d = gallogQuietDays(t);
+  if (d === null) return esc(nums);
+  if (d < 1) return `${esc(nums)} <span class="muted">(방금 기록)</span>`;
+  return `${esc(nums)} <span class="${gallogQuiet(t) ? "bad" : "muted"}">${d}일째 그대로</span>`;
 }
 
 $("btnActivity").addEventListener("click", () => {
@@ -693,6 +795,10 @@ function setAllClean(checked) {
 $("btnCleanAll").addEventListener("click", () => setAllClean(true));
 $("btnCleanNone").addEventListener("click", () => setAllClean(false));
 
+// 표 머리글의 전체선택. 넣어만 두고 동작을 안 붙여서, 눌러도 아무 일이
+// 없는 채로 나가 있었다. 표가 길면 아래 버튼까지 내려가기 번거롭다.
+$("cleanAll").addEventListener("change", (e) => setAllClean(e.target.checked));
+
 $("btnCleanDel").addEventListener("click", async () => {
   const picked = [...document.querySelectorAll(".cleanchk")]
     .filter((c) => c.checked).map((c) => c.dataset.code);
@@ -701,14 +807,21 @@ $("btnCleanDel").addEventListener("click", async () => {
     return;
   }
   const set = new Set(picked);
-  const weak = state.watchlist.filter(
-    (t) => set.has(t.value) && t.gallogState !== "deleted" && t.gallogState !== "notfound"
-  ).length;
+  const chosen = state.watchlist.filter((t) => set.has(t.value));
+  const sure = chosen.filter(
+    (t) => t.gallogState === "deleted" || t.gallogState === "notfound").length;
+  const quiet = chosen.filter(
+    (t) => t.gallogState !== "deleted" && t.gallogState !== "notfound" && gallogQuiet(t)).length;
+  const weak = chosen.length - sure - quiet;
 
   if (!confirm(
     `${picked.length}명을 명단에서 지웁니다.\n\n` +
+    (quiet
+      ? `${quiet}명은 갤로그 글·댓글 수가 오래 그대로입니다.\n` +
+        `디시 전체에서 조용하다는 뜻이라 근거가 제법 셉니다.\n\n`
+      : "") +
     (weak
-      ? `이 중 ${weak}명은 '글이 없다'는 것뿐이고 탈퇴가 확인된 건 아닙니다.\n` +
+      ? `${weak}명은 '이 갤에 글이 없다'는 것뿐이고 탈퇴가 확인된 건 아닙니다.\n` +
         `글 목록에는 댓글이 나오지 않으므로, 댓글로만 활동하는 사람이 섞여 있을 수 있습니다.\n\n`
       : "") +
     `지우면 이 사람들의 차단이 풀려도 다시 막지 않습니다.`
