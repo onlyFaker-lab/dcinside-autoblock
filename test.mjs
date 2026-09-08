@@ -547,9 +547,11 @@ console.log("\n[11] 명단 정리");
   // 갤로그. 2026-09-08 확인: 탈퇴한 계정은 404 + '삭제된 갤로그입니다' 본문이 온다.
   // 브라우저 주소창은 /_error/deleted 로 바뀌지만 그건 페이지가 스크립트로
   // 바꾸는 것이라 fetch 에는 안 잡힌다. 주소만 믿으면 탈퇴를 놓친다.
-  const DELETED_PAGE = `<div><strong>삭제된 갤로그입니다.</strong>
-    <a href="https://gallog.dcinside.com/">https://gallog.dcinside.com/식별 코드</a>
-    주소에 다른 식별 코드를 입력해주세요.</div>`;
+  // 2026-09-08 서비스워커 콘솔에서 실제로 받은 응답. 103바이트, 이게 전부다.
+  // 브라우저에서 보이는 "삭제된 갤로그입니다" 문구는 여기 없다.
+  // 그건 스크립트가 이동한 뒤의 페이지에 있고, fetch 는 스크립트를 안 돌린다.
+  const DELETED_PAGE =
+    `<script type="text/javascript">location.replace("https://gallog.dcinside.com/_error/deleted");</script>`;
   globalThis.fetch = async (u) => {
     if (u.includes("deadman")) {
       // 실제로 오는 형태: 404 + 삭제 안내 본문, 주소는 그대로
@@ -584,6 +586,9 @@ console.log("\n[11] 명단 정리");
   eq("없는 코드는 notfound", (await checkGallog("zzzz9999")).state, "notfound");
   ok("탈퇴와 없는 코드가 갈림",
      (await checkGallog("deadman1234")).state !== (await checkGallog("zzzz9999")).state);
+  // 실제 응답은 103바이트다. 문구가 아니라 스크립트 안의 이동 주소로 잡는다.
+  ok("실제 응답 크기 그대로", DELETED_PAGE.length < 130, String(DELETED_PAGE.length));
+  ok("안내 문구는 본문에 없다", !/삭제된/.test(DELETED_PAGE));
   eq("숫자 못 읽어도 alive", (await checkGallog("nocount")).state, "alive");
   eq("못 읽으면 null (0이 아니다)", (await checkGallog("nocount")).counts, null);
 
