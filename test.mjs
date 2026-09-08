@@ -799,6 +799,35 @@ console.log("\n[15] 요청 간격");
     waits.every((w) => /jitter\(/.test(w)),
     waits.filter((w) => !/jitter\(/.test(w)).join(" / ") || "전부 난수"
   );
+
+  // 설정 화면이 '조회 한 명당 0.4초'라고 설명한 채로 간격만 1.2초로 올린 적이
+  // 있다. 완장은 그 문구를 보고 기다릴 시간을 가늠하므로 어긋나면 안 된다.
+  const popupHtml = readFileSync(new URL("./popup.html", import.meta.url), "utf8");
+  const shown = popupHtml.match(/조회 한 명당 ([\d.]+)초/);
+  ok("설정 화면에 조회 속도 설명이 있다", !!shown, shown ? shown[1] : "없음");
+  if (shown) {
+    ok(
+      "설명한 조회 속도가 실제 간격과 같다",
+      Number(shown[1]) === CHECK_DELAY_MS / 1000,
+      `화면 ${shown[1]}초 / 실제 ${CHECK_DELAY_MS / 1000}초`
+    );
+  }
+
+  // 같은 것을 식별자·식별 코드·식별코드 세 가지로 부르던 것을 하나로 모았다.
+  const strayTerms = (popupHtml.match(/식별자|식별 코드/g) || []);
+  ok("식별코드 표기가 하나로 통일돼 있다", strayTerms.length === 0,
+     strayTerms.join(", ") || "통일됨");
+
+  // 탭과 화면이 짝이 맞아야 한다. 이름만 바꾸고 화면을 안 만들면 빈 탭이 된다.
+  const tabKeys = [...popupHtml.matchAll(/data-tab="([^"]+)"/g)].map((m) => m[1]);
+  const segKeys = [...popupHtml.matchAll(/data-seg="([^"]+)"/g)].map((m) => m[1]);
+  ok("탭이 4개다", tabKeys.length === 4, tabKeys.join(", "));
+  ok("갈래가 3개다", segKeys.length === 3, segKeys.join(", "));
+  ok(
+    "모든 탭·갈래에 짝이 되는 화면이 있다",
+    [...tabKeys, ...segKeys].every((k) => popupHtml.includes(`id="tab-${k}"`)),
+    [...tabKeys, ...segKeys].filter((k) => !popupHtml.includes(`id="tab-${k}"`)).join(", ") || "전부 있음"
+  );
   ok("연속 실패 상한이 있다", GALLOG_FAIL_STREAK > 0 && GALLOG_FAIL_STREAK <= 10,
      `${GALLOG_FAIL_STREAK}`);
 }
@@ -835,6 +864,34 @@ console.log("\n[16] 판정 이어가기");
   eq("빈 목록", carryOver(undefined, new Set(), watched).length, 0);
   eq("code 없는 항목은 버림",
      carryOver([{ nick: "ㅇㅇ" }, null], new Set(), watched).length, 0);
+}
+
+// ── [17] 설정 화면에 적힌 기본값 ──────────────────────────
+// 화면에 '기본값: 300'이라고 적어놓고 코드가 다른 값을 쓰면, 완장은 건드리지
+// 않은 값이 뭔지 알 수 없게 된다. 문구와 코드가 어긋나면 실패한다.
+{
+  console.log("\n[17] 설정 화면의 기본값 표시");
+  const html = readFileSync(new URL("./popup.html", import.meta.url), "utf8");
+  const js = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
+  const shownFor = (id) => {
+    const at = html.indexOf(`id="${id}"`);
+    const end = html.indexOf("</label>", at);
+    const m = html.slice(at, end).match(/기본값:\s*(\d+)/);
+    return m ? Number(m[1]) : null;
+  };
+  const codeFor = (key) => {
+    const m = js.match(new RegExp(`${key}:\\s*(\\d+)`));
+    return m ? Number(m[1]) : null;
+  };
+  for (const [id, key] of [
+    ["cfgMax", "maxPerRun"],
+    ["cfgChecks", "maxChecksPerRun"],
+    ["cfgSweep", "sweepPerRun"],
+  ]) {
+    const shown = shownFor(id), real = codeFor(key);
+    ok(`${key} 기본값 표시가 코드와 같다`, shown !== null && shown === real,
+       `화면 ${shown} / 코드 ${real}`);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

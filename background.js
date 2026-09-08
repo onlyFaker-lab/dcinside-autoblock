@@ -857,7 +857,7 @@ async function runGallog(limit = 50) {
     }
     await setStatus(aborted ? "갤로그 점검 중단됨" : "대기 중", false);
     if (tally.deleted) {
-      notify("탈퇴한 계정을 찾았습니다", `${tally.deleted}명. 명단 정리 탭에서 확인하세요.`);
+      notify("탈퇴한 계정을 찾았습니다", `${tally.deleted}명. 명단 → 빼기 에서 확인하세요.`);
     }
     return { ok: !aborted, checked: done, tally, aborted };
   } catch (e) {

@@ -31,10 +31,22 @@ async function load() {
     candidates: s.candidates || [],
     manual: s.manual || [],
     imports: s.imports || [],
+    importsAt: s.importsAt || 0,
     history: s.history || [],
     logs: s.logs || [],
     status: s.status || { text: "대기 중", busy: false, busySince: 0 },
   };
+
+  // 명단 채우기를 다시 돌리면 체크 상태를 처음으로 되돌린다.
+  // scanUnchecked는 사유 칩을 바꿔도 손으로 푼 체크를 기억하려고 두는 것인데,
+  // 새 결과에까지 남아 있으면 안 된다. 파딱 피드백(2026-09-08):
+  // "경우에 따라 체크가 해제되어 있기도 했지만 그렇지 않은 경우도 있다."
+  // 지난 스캔에서 푼 체크가 새 결과의 같은 코드에 그대로 붙어 있던 것이다.
+  if (state.importsAt !== lastImportsAt) {
+    lastImportsAt = state.importsAt;
+    scanUnchecked.clear();
+    scanReasons = null;
+  }
   render();
 }
 
@@ -89,6 +101,10 @@ function render() {
   $("candEmpty").classList.toggle("hidden",
     state.candidates.length > 0 || state.manual.length > 0);
   $("shareBox").classList.toggle("hidden", state.candidates.length === 0);
+
+  // 처음 켠 완장은 빈 후보 화면만 보고 무엇부터 할지 모른다. 명단이 비어 있으면
+  // 어디로 가야 하는지 알려준다. 명단이 차면 저절로 사라진다.
+  $("candStart").classList.toggle("hidden", state.watchlist.length > 0);
 
   // 완장이 직접 풀어준 대상
   $("manualBox").classList.toggle("hidden", state.manual.length === 0);
@@ -260,6 +276,17 @@ document.querySelectorAll(".tab").forEach((btn) => {
   });
 });
 
+// 명단 탭 안의 세 갈래(보기 / 채우기 / 빼기). 위 탭과 같은 방식이되
+// .subpanel 만 건드려서 서로 간섭하지 않는다.
+document.querySelectorAll(".seg").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".seg").forEach((b) => b.classList.remove("on"));
+    document.querySelectorAll(".subpanel").forEach((p) => p.classList.remove("on"));
+    btn.classList.add("on");
+    $(`tab-${btn.dataset.seg}`).classList.add("on");
+  });
+});
+
 $("btnCheck").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "check" });
 });
@@ -365,6 +392,9 @@ $("manualBody").addEventListener("click", async (e) => {
 // scanUnchecked 는 사용자가 손으로 푼 체크를 필터를 바꿔도 기억하기 위한 것이다.
 let scanReasons = null;
 const scanUnchecked = new Set();
+// 마지막으로 본 명단 채우기 결과의 시각. 이게 바뀌면 새로 불러온 것이므로
+// 체크 상태와 사유 필터를 처음으로 되돌린다. load()에서 본다.
+let lastImportsAt = 0;
 const NO_REASON = "(사유 없음)";
 const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", "저작권 침해", "명예훼손"];
 const reasonOf = (it) => it.reason || NO_REASON;
@@ -403,7 +433,10 @@ syncScanInputs();
 
 $("btnScan").addEventListener("click", () => {
   const until = $("scanUntil").value || "";
-  chrome.runtime.sendMessage({ type: "scan", pages: scanPagesToUse(), until });
+  const includeReleased = $("scanReleased").checked;
+  chrome.runtime.sendMessage({
+    type: "scan", pages: scanPagesToUse(), until, includeReleased,
+  });
 });
 
 // 화면을 다시 그리면 체크박스가 새로 만들어지므로 개별 요소가 아니라
@@ -584,6 +617,7 @@ async function importItems(items, exportedAt) {
   const seen = new Set();
   const fresh = [];
   const unknownReasons = new Map();     // 우리가 모르는 사유 → 몇 명
+  let noReason = 0;                     // 사유 칸이 아예 없던 사람
 
   for (const it of items) {
     const code = String(it.code || "").trim();
@@ -595,6 +629,10 @@ async function importItems(items, exportedAt) {
     // 모르는 사유를 조용히 '음란성'으로 바꾸면, 나중에 그 사유로 재차단된다.
     // 바꾸는 건 어쩔 수 없지만 몇 명이 그렇게 됐는지는 알려준다.
     if (given && !ok) unknownReasons.set(given, (unknownReasons.get(given) || 0) + 1);
+    // 사유 칸이 아예 없는 파일도 조용히 음란성이 됐다. 옛 버전으로 내보낸
+    // 파일이 그렇다. 파딱이 "사유가 전부 음란성으로 통일된다"고 한 게 이것으로
+    // 보인다. 위의 조건은 given이 비어 있으면 타지 않아서 아무 말도 안 했다.
+    if (!given) noReason++;
 
     fresh.push({
       code,
@@ -620,6 +658,10 @@ async function importItems(items, exportedAt) {
     `${fresh.length}명을 명단에 추가합니다.\n\n${detail}\n` +
     (memos ? `\n메모 ${memos}건도 같이 들어갑니다.\n` : "") +
     (odd ? `\n[주의] 모르는 사유가 있어 '음란성'으로 넣습니다:\n${odd}\n` : "") +
+    (noReason
+      ? `\n[주의] ${noReason}명은 파일에 사유가 없어 '음란성'으로 넣습니다.\n` +
+        `  옛 버전으로 내보낸 파일일 수 있습니다. 추가한 뒤 명단 탭에서 사유를 고쳐주세요.\n`
+      : "") +
     (dup ? `\n(이미 있거나 중복인 ${dup}명은 건너뜁니다)\n` : "") +
     (exportedAt ? `\n파일 만든 시각: ${new Date(exportedAt).toLocaleString("ko-KR")}` : "")
   )) return;
@@ -769,10 +811,26 @@ $("btnActivity").addEventListener("click", () => {
 });
 
 $("btnGallog").addEventListener("click", () => {
-  const limit = Math.max(10, Math.min(2000, Number($("cleanLimit").value) || 300));
+  const limit = Math.max(10, Math.min(500, Number($("cleanLimit").value) || 50));
+  // 입력칸 값이 아니라 실제로 볼 인원으로 계산한다. 명단이 2명인데 상한이
+  // 50이면 '1분'이라고 안내하고 3초 만에 끝난다(2026-09-08 실제).
+  // 이미 탈퇴로 확인된 사람은 다시 안 보므로 여기서도 뺀다.
+  const pool = state.watchlist.filter(
+    (t) => t.kind === "code" && t.gallogState !== "deleted"
+  ).length;
+  const n = Math.min(limit, pool);
+  if (!n) {
+    alert("갤로그를 확인할 대상이 없습니다.\n\n명단에 식별 코드를 먼저 넣어주세요.");
+    return;
+  }
+  // 1.2초 간격에 난수를 섞으므로 평균이 그대로 예상 시간이 된다.
+  const secs = Math.round((n * 1.2));
+  const eta = secs < 60 ? `${secs}초` : `${Math.ceil(secs / 60)}분`;
   if (!confirm(
-    `${limit}명의 갤로그를 하나씩 확인합니다.\n` +
-    `한 명당 요청 한 번이라 ${Math.ceil(limit * 0.4 / 60)}분쯤 걸립니다.\n\n시작할까요?`
+    `${n}명의 갤로그를 하나씩 확인합니다.\n` +
+    `${eta}쯤 걸립니다. 창을 닫아도 계속 진행됩니다.\n\n` +
+    `빠르게 많이 조회하면 디시가 IP를 막습니다. 일부러 천천히 돕니다.\n` +
+    `한 번에 너무 많이 잡지 마세요.\n\n시작할까요?`
   )) return;
   chrome.runtime.sendMessage({ type: "gallog", limit });
 });
