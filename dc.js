@@ -359,6 +359,26 @@ function searchUrl(galleryId, code) {
   return `${BLOCK_URL}?${params.toString()}`;
 }
 
+// 로그인이 풀리면 디시는 안내 문구가 아니라 **스크립트 한 줄**을 돌려준다.
+// 2026-09-09 실측: 87바이트, `<script>`로 시작하고 location 으로 보내며,
+// 한글이 한 글자도 없다. 갤로그 탈퇴 계정(103바이트)과 같은 모양이다.
+//
+// 예전에는 `/로그인/.test(html)` 로 가렸는데, 본문에 그 글자가 없으니
+// 절대 안 걸렸다. 그래서 로그아웃인데도 "매니저 권한이 있는 갤러리인지
+// 확인하세요"가 떴다. 완장은 자기 권한이 날아간 줄 알고 엉뚱한 곳을 본다.
+//
+// ⚠ ci_c 쿠키는 로그아웃해도 남는다. 쿠키가 있다고 로그인된 게 아니다.
+// getCiToken()이 성공해도 여기서 다시 걸러야 한다.
+function looksLoggedOut(html) {
+  const body = String(html || "");
+  // 본문이 짧고 스크립트로 어디론가 보내기만 하는 경우
+  if (body.length < 500 && /^\s*<script/i.test(body) && /location/i.test(body)) {
+    return true;
+  }
+  // 로그인 화면을 통째로 돌려주는 경우도 대비해 남겨둔다
+  return /로그인/.test(body) && !/로그아웃/.test(body);
+}
+
 export async function fetchRowsForCode(galleryId, code) {
   const res = await fetch(searchUrl(galleryId, code), {
     credentials: "include",
@@ -367,7 +387,7 @@ export async function fetchRowsForCode(galleryId, code) {
   const html = await res.text();
 
   if (!/minor_block_list/.test(html)) {
-    if (/로그인/.test(html) && !/로그아웃/.test(html)) {
+    if (looksLoggedOut(html)) {
       throw new Error("로그인이 풀린 것 같습니다. 디시에 다시 로그인해 주세요.");
     }
     throw new Error("차단 목록을 읽지 못했습니다. 매니저 권한이 있는 갤러리인지 확인하세요.");
@@ -461,6 +481,11 @@ async function crawlList(galleryId, maxPages, onPage, opts = {}) {
     const html = await res.text();
     if (!/minor_block_list/.test(html)) {
       if (page === 1) {
+        // 여기도 로그인 풀림을 갈라야 한다. 안 그러면 로그아웃 상태에서
+        // "갤러리 ID와 매니저 권한을 확인하세요"가 떠서 엉뚱한 데를 보게 된다.
+        if (looksLoggedOut(html)) {
+          throw new Error("로그인이 풀린 것 같습니다. 디시에 다시 로그인해 주세요.");
+        }
         throw new Error("차단 목록을 읽지 못했습니다. 갤러리 ID와 매니저 권한을 확인하세요.");
       }
       break;

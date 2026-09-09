@@ -14,7 +14,7 @@ import {
   expiresAt, isManualRelease, labelForHours,
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
-  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets,
+  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, fetchRowsForCode,
 } from "./dc.js";
 import { readFileSync } from "node:fs";
 
@@ -994,6 +994,51 @@ console.log("\n[16] 판정 이어가기");
     ok(`${key} 기본값 표시가 코드와 같다`, shown !== null && shown === real,
        `화면 ${shown} / 코드 ${real}`);
   }
+}
+
+
+// ── 로그인이 풀렸을 때 ──────────────────────────────────────
+// 2026-09-09 실측. 로그아웃 상태로 관리 화면을 부르면 디시는 안내 문구가 아니라
+// 87바이트짜리 스크립트 한 줄을 준다. 한글이 한 글자도 없다.
+// 예전 코드는 /로그인/ 을 찾았는데 본문에 그 글자가 없어서 절대 안 걸렸고,
+// 그래서 "매니저 권한이 있는 갤러리인지 확인하세요"가 떴다.
+// 완장은 자기 권한이 날아간 줄 알고 엉뚱한 곳을 본다.
+console.log("\n[로그인 풀림 감지]");
+{
+  // 실물과 같은 모양 (경로는 바뀔 수 있으므로 구조만 흉내낸다)
+  const STUB = '<script>location.replace("/");</script>';
+  ok("실물 크기대로 짧다", STUB.length < 500);
+  ok("한글이 없다", !/[가-힣]/.test(STUB));
+
+  const call = async (html) => {
+    globalThis.fetch = async () => ({ ok: true, text: async () => html });
+    try { await fetchRowsForCode("gid", "capture6180"); return "성공"; }
+    catch (e) { return e.message; }
+    finally { delete globalThis.fetch; }
+  };
+
+  ok("로그인 풀림이라고 말한다",
+     /로그인이 풀린/.test(await call(STUB)), await call(STUB));
+  ok("권한 탓으로 돌리지 않는다",
+     !/매니저 권한/.test(await call(STUB)), await call(STUB));
+
+  // 로그인 화면을 통째로 주는 경우도 여전히 잡아야 한다
+  ok("로그인 화면도 잡는다",
+     /로그인이 풀린/.test(await call("<html><body>로그인 해주세요</body></html>")));
+
+  // 진짜 권한 문제는 권한 문제라고 해야 한다. 여기까지 로그인 탓으로
+  // 돌리면 반대 방향으로 잘못 짚게 된다.
+  const noPerm = "<html><body>" + "권한이 없습니다. ".repeat(60) + "로그아웃</body></html>";
+  ok("권한 문제는 권한 문제로", /매니저 권한/.test(await call(noPerm)), await call(noPerm));
+
+  // 정상 응답은 그대로 파싱돼야 한다
+  const good = await (async () => {
+    globalThis.fetch = async () => ({ ok: true, text: async () =>
+      table([row({ nik: "ㅇㅇ", code: "chip3298" })]) });
+    try { return (await fetchRowsForCode("gid", "chip3298")).length; }
+    finally { delete globalThis.fetch; }
+  })();
+  eq("정상 목록은 그대로 읽는다", good, 1);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

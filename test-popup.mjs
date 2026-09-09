@@ -38,7 +38,21 @@ function makeEl(id, tag = "div", attrs = {}) {
       const cls = sel.replace(/^\./, "");
       return this._classes.has(cls) ? this : null;
     },
-    querySelectorAll: () => [],
+    // 자기 innerHTML 에서 요소를 긁어온다. popup.js 가 그린 HTML 을 실제로
+    // 읽으므로 클래스 이름이나 value 가 어긋나면 여기서 잡힌다.
+    querySelectorAll(sel) {
+      const cls = sel.replace(/^\./, "");
+      const out = [];
+      const re = new RegExp(`<input[^>]*class="${cls}"[^>]*>`, "g");
+      for (const m of (this.innerHTML || "").match(re) || []) {
+        const el = makeEl("", "input", { class: cls });
+        el.value = (m.match(/value="([^"]*)"/) || [])[1] || "";
+        el.checked = / checked/.test(m);
+        el.dataset.code = (m.match(/data-code="([^"]*)"/) || [])[1] || "";
+        out.push(el);
+      }
+      return out;
+    },
   };
   el.classList = {
     add: (c) => el._classes.add(c),
@@ -315,6 +329,137 @@ console.log("\n[6] 갤로그 변동 없는 사람이 목록에 오른다");
   els.get("cleanMonths").value = "3";
   await sandbox.load();
   ok("되돌리면 다시 나옴", els.get("cleanBody").innerHTML.includes("quiet001"));
+}
+
+
+// ── 명단 사유 수정 / 중지만 보기 / 직접 입력 사유 ──────────
+// 파딱 요청(2026-09-09):
+//  · 이미 등록된 사람의 사유·메모를 고칠 수 있게
+//  · 중지된 사람만 모아볼 수 있게
+//  · 명단에 넣을 때도 직접 입력 사유를 쓸 수 있게 (파딱 갤 4533명이 전원 직접 입력)
+{
+  console.log("\n[명단 수정 · 거르기 · 직접 입력 사유]");
+  const click = (el, dataset) =>
+    el.dispatchEvent({ type: "click", target: { dataset, closest: () => null } });
+
+  await seed({
+    watchlist: [
+      { kind: "code", value: "aaa1111", reason: "벌레", memo: "메모A", enabled: true },
+      { kind: "code", value: "bbb2222", reason: "광고", memo: "메모B", enabled: false },
+      { kind: "code", value: "ccc3333", reason: "음란성", memo: "", enabled: true },
+    ],
+  });
+  const lb = els.get("listBody");
+
+  ok("수정 버튼이 생겼다", lb.innerHTML.includes("수정"), lb.innerHTML.slice(0, 200));
+  ok("중지/삭제도 그대로", lb.innerHTML.includes("중지") && lb.innerHTML.includes("삭제"));
+
+  // ── 중지만 보기 ─────────────────────────────────────────
+  els.get("listFilter").value = "off";
+  els.get("listFilter").dispatchEvent({ type: "change" });
+  ok("중지만: 중지된 사람만", lb.innerHTML.includes("bbb2222"));
+  ok("중지만: 사용 중인 사람 제외", !lb.innerHTML.includes("aaa1111"));
+
+  els.get("listFilter").value = "on";
+  els.get("listFilter").dispatchEvent({ type: "change" });
+  ok("사용만: 중지된 사람 제외", !lb.innerHTML.includes("bbb2222"));
+  ok("사용만: 사용 중인 사람 포함", lb.innerHTML.includes("ccc3333"));
+
+  els.get("listFilter").value = "all";
+  els.get("listFilter").dispatchEvent({ type: "change" });
+  ok("전체로 되돌림", lb.innerHTML.includes("bbb2222") && lb.innerHTML.includes("aaa1111"));
+
+  // ── 사유로 찾기 ─────────────────────────────────────────
+  els.get("listSearch").value = "벌레";
+  els.get("listSearch").dispatchEvent({ type: "input" });
+  ok("직접 입력 사유로도 찾힌다", lb.innerHTML.includes("aaa1111"));
+  ok("사유가 다른 사람은 빠진다", !lb.innerHTML.includes("ccc3333"));
+  els.get("listSearch").value = "";
+  els.get("listSearch").dispatchEvent({ type: "input" });
+
+  // ── 수정 → 저장 ─────────────────────────────────────────
+  click(lb, { edit: "0" });
+  ok("수정 모드에 입력칸이 뜬다", lb.innerHTML.includes("editReason"), lb.innerHTML.slice(0, 300));
+  ok("기존 사유가 채워져 있다", lb.innerHTML.includes('value="벌레"'));
+  ok("저장·취소 버튼", lb.innerHTML.includes("저장") && lb.innerHTML.includes("취소"));
+
+  // 입력칸 값을 바꾼 것처럼 innerHTML 을 고쳐두고 저장한다
+  lb.innerHTML = lb.innerHTML
+    .replace('value="벌레"', 'value="분탕"')
+    .replace('value="메모A"', 'value="메모A 수정"');
+  click(lb, { save: "0" });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("사유가 바뀌었다", stored.watchlist[0].reason === "분탕", stored.watchlist[0].reason);
+  ok("메모도 바뀌었다", stored.watchlist[0].memo === "메모A 수정", stored.watchlist[0].memo);
+  ok("식별코드는 안 건드림", stored.watchlist[0].value === "aaa1111");
+  ok("사용 여부도 그대로", stored.watchlist[0].enabled === true);
+
+  // ── 취소하면 안 바뀐다 ──────────────────────────────────
+  click(lb, { edit: "2" });
+  lb.innerHTML = lb.innerHTML.replace('value="음란성"', 'value="바뀌면안됨"');
+  click(lb, { cancel: "2" });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("취소하면 그대로", stored.watchlist[2].reason === "음란성", stored.watchlist[2].reason);
+
+  // ── 20자를 넘기면 자른다 (디시 한도) ────────────────────
+  click(lb, { edit: "2" });
+  lb.innerHTML = lb.innerHTML.replace('value="음란성"', `value="${"가".repeat(30)}"`);
+  click(lb, { save: "2" });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("20자로 잘림", [...stored.watchlist[2].reason].length === 20,
+     `${[...stored.watchlist[2].reason].length}자`);
+
+  // ── 빈 사유는 거절 ──────────────────────────────────────
+  const before = stored.watchlist[2].reason;
+  click(lb, { edit: "2" });
+  lb.innerHTML = lb.innerHTML.replace(/class="editReason"[^>]*value="[^"]*"/,
+                                      'class="editReason" value="   "');
+  click(lb, { save: "2" });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("빈 사유는 저장 안 됨", stored.watchlist[2].reason === before, stored.watchlist[2].reason);
+
+  // ── 한 명 추가에서 직접 입력 사유 ───────────────────────
+  els.get("listFilter").value = "all";
+  els.get("newCode").value = "ddd4444";
+  els.get("newReason").value = "__custom__";
+  els.get("newReason").dispatchEvent({ type: "change" });
+  ok("직접 입력을 고르면 칸이 보인다",
+     !els.get("newReasonTxt").classList.contains("hidden"));
+  els.get("newReasonTxt").value = "벌레";
+  els.get("btnAdd").click();
+  await new Promise((r) => setTimeout(r, 0));
+  const added = stored.watchlist.find((t) => t.value === "ddd4444");
+  ok("직접 입력 사유로 추가된다", added && added.reason === "벌레",
+     added ? added.reason : "안 들어감");
+
+  // 아는 사유를 고르면 칸이 숨는다
+  els.get("newReason").value = "광고";
+  els.get("newReason").dispatchEvent({ type: "change" });
+  ok("아는 사유면 칸이 숨는다", els.get("newReasonTxt").classList.contains("hidden"));
+
+  // ── 여러 명 한 번에도 직접 입력이 돼야 한다 ─────────────
+  // 파딱 갤은 4533명을 한꺼번에 넣는다. 여기가 막히면 소용이 없다.
+  els.get("bulkText").value = "eee5555\nfff6666";
+  els.get("bulkReason").value = "__custom__";
+  els.get("bulkReason").dispatchEvent({ type: "change" });
+  ok("여러 명: 직접 입력 칸이 보인다",
+     !els.get("bulkReasonTxt").classList.contains("hidden"));
+  els.get("bulkReasonTxt").value = "분탕";
+  els.get("btnBulkAdd").click();
+  await new Promise((r) => setTimeout(r, 0));
+  const bulk = stored.watchlist.filter((t) => ["eee5555", "fff6666"].includes(t.value));
+  ok("여러 명이 다 들어감", bulk.length === 2, `${bulk.length}명`);
+  ok("전원 직접 입력 사유", bulk.every((t) => t.reason === "분탕"),
+     JSON.stringify(bulk.map((t) => t.reason)));
+
+  // 직접 입력을 골라놓고 비워두면 막아야 한다. 그냥 넣으면 사유가 빈 채로
+  // 명단에 들어가고, 재차단할 때 디시가 거절한다.
+  const n = stored.watchlist.length;
+  els.get("bulkText").value = "ggg7777";
+  els.get("bulkReasonTxt").value = "";
+  els.get("btnBulkAdd").click();
+  await new Promise((r) => setTimeout(r, 0));
+  ok("빈 직접 입력은 막는다", stored.watchlist.length === n, `${stored.watchlist.length} vs ${n}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -129,11 +129,20 @@ function render() {
 
   // 명단 — 수만 명이 될 수 있으므로 검색 + 표시 상한을 둔다
   const q = ($("listSearch").value || "").trim().toLowerCase();
+  // 중지는 손으로도 걸지만 대부분 60일 자동 중지로 붙는다. 명단에서 뺄지
+  // 판단하려면 그 사람들만 모아볼 수 있어야 한다(파딱 요청 2026-09-09).
+  const only = $("listFilter").value;
   const rowsAll = state.watchlist
     .map((t, i) => ({ t, i }))
-    .filter(({ t }) => !q ||
-      t.value.toLowerCase().includes(q) ||
-      (t.memo || "").toLowerCase().includes(q));
+    .filter(({ t }) => {
+      if (only === "on" && t.enabled === false) return false;
+      if (only === "off" && t.enabled !== false) return false;
+      // 사유로도 찾을 수 있어야 한다. 직접 입력 사유를 쓰면 사유가 곧 분류다.
+      return !q ||
+        t.value.toLowerCase().includes(q) ||
+        (t.memo || "").toLowerCase().includes(q) ||
+        (t.reason || "").toLowerCase().includes(q);
+    });
   const LIST_LIMIT = 200;
   const shown = rowsAll.slice(0, LIST_LIMIT);
 
@@ -141,17 +150,29 @@ function render() {
   $("listCount").textContent =
     `전체 ${state.watchlist.length}명` +
     (off ? ` (중지 ${off}명)` : "") +
-    (q ? ` · 검색 ${rowsAll.length}명` : "") +
+    (q || only !== "all" ? ` · 보이는 것 ${rowsAll.length}명` : "") +
     (rowsAll.length > LIST_LIMIT ? ` · ${LIST_LIMIT}명만 표시` : "");
 
   const lb = $("listBody");
-  lb.innerHTML = shown.map(({ t, i }) => `
+  lb.innerHTML = shown.map(({ t, i }) => i === editingRow ? `
+    <tr>
+      <td>${esc(t.value)}</td>
+      <td><input class="editReason" type="text" maxlength="${REASON_TXT_MAX}"
+                 value="${esc(t.reason || "")}" style="width:110px"></td>
+      <td>${t.enabled === false ? "<span class='muted'>중지</span>" : "<span class='ok'>사용</span>"}</td>
+      <td><input class="editMemo" type="text" value="${esc(t.memo || "")}" style="width:100%"></td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="linkbtn" data-save="${i}">저장</button>
+        <button class="linkbtn" data-cancel="${i}">취소</button>
+      </td>
+    </tr>` : `
     <tr>
       <td>${esc(t.value)}</td>
       <td>${esc(t.reason)}</td>
       <td>${t.enabled === false ? "<span class='muted'>중지</span>" : "<span class='ok'>사용</span>"}</td>
       <td class="muted">${esc(t.memo || "")}</td>
       <td style="text-align:right;white-space:nowrap">
+        <button class="linkbtn" data-edit="${i}">수정</button>
         <button class="linkbtn" data-toggle="${i}">${t.enabled === false ? "사용" : "중지"}</button>
         <button class="linkbtn" data-del="${i}">삭제</button>
       </td>
@@ -318,10 +339,17 @@ $("btnAdd").addEventListener("click", async () => {
     return;
   }
 
+  const reason = readReason("newReason", "newReasonTxt");
+  if (reason === null) {
+    alert("사유를 직접 입력하기로 했는데 비어 있습니다.");
+    $("newReasonTxt").focus();
+    return;
+  }
+
   state.watchlist.push({
     kind: "code",
     value,
-    reason: $("newReason").value,
+    reason,
     memo: $("newMemo").value.trim(),
     enabled: true,
   });
@@ -332,13 +360,40 @@ $("btnAdd").addEventListener("click", async () => {
 });
 
 $("listBody").addEventListener("click", async (e) => {
-  const del = e.target.dataset.del;
-  const toggle = e.target.dataset.toggle;
+  const d = e.target.dataset;
+  const { del, toggle, edit, save, cancel } = d;
 
-  if (del !== undefined) {
+  if (edit !== undefined) {
+    editingRow = Number(edit);
+    render();
+    return;                       // 아직 저장할 게 없다
+  }
+  if (cancel !== undefined) {
+    editingRow = -1;
+    render();
+    return;
+  }
+  if (save !== undefined) {
+    // 수정 중인 행은 언제나 하나뿐이라 listBody 안에서 바로 찾는다.
+    // closest("tr") 보다 얕게 의존해서 검사하기도 쉽다.
+    const t = state.watchlist[Number(save)];
+    const rEl = $("listBody").querySelectorAll(".editReason")[0];
+    const mEl = $("listBody").querySelectorAll(".editMemo")[0];
+    if (!rEl) { editingRow = -1; render(); return; }
+    const reason = rEl.value.trim();
+    if (!reason) {
+      alert("사유는 비워둘 수 없습니다.");
+      return;
+    }
+    // 재차단할 때 20자를 넘으면 디시가 잘라버린다. 여기서 미리 맞춘다.
+    t.reason = [...reason].slice(0, REASON_TXT_MAX).join("");
+    t.memo = mEl ? mEl.value.trim() : (t.memo || "");
+    editingRow = -1;
+  } else if (del !== undefined) {
     const t = state.watchlist[Number(del)];
     if (!confirm(`'${t.value}' 를 명단에서 지울까요?`)) return;
     state.watchlist.splice(Number(del), 1);
+    editingRow = -1;              // 번호가 밀리므로 수정 상태를 푼다
   } else if (toggle !== undefined) {
     const t = state.watchlist[Number(toggle)];
     t.enabled = t.enabled === false;
@@ -392,6 +447,10 @@ $("manualBody").addEventListener("click", async (e) => {
 // 명단 채우기 화면의 사유 필터 상태.
 // scanReasons 가 null 이면 전체, 비어 있지 않은 Set 이면 그 사유만 보여준다.
 // scanUnchecked 는 사용자가 손으로 푼 체크를 필터를 바꿔도 기억하기 위한 것이다.
+// 지금 수정 중인 명단 행 번호. render()가 이 행만 입력칸으로 그린다.
+// 화면에서 상태를 읽지 않고 여기 한 곳에만 둔다 (3-4절 규칙).
+let editingRow = -1;
+
 let scanReasons = null;
 const scanUnchecked = new Set();
 // 마지막으로 본 명단 채우기 결과의 시각. 이게 바뀌면 새로 불러온 것이므로
@@ -404,6 +463,34 @@ const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", 
 // popup.js 는 dc.js 를 가져오지 않으므로 여기 적어둔다.
 // 두 값이 어긋나면 test.mjs 가 실패한다.
 const REASON_TXT_MAX = 20;
+const CUSTOM_PICK = "__custom__";
+
+// 사유 칸 하나를 묶어서 다룬다. 드롭다운에서 '직접 입력'을 고르면 텍스트 칸이
+// 나오고, 그 값이 사유가 된다.
+//
+// 파딱 갤은 명단 4533명이 전원 직접 입력 사유('벌레' 같은)라, 7개 고정
+// 드롭다운으로는 명단에 새로 넣는 모든 경로에서 그 사유를 쓸 수 없었다.
+// 파일로 불러올 때만 살아남았다.
+function bindReasonPicker(selId, txtId) {
+  const sel = $(selId), txt = $(txtId);
+  const sync = () => {
+    const custom = sel.value === CUSTOM_PICK;
+    txt.classList.toggle("hidden", !custom);
+    if (custom) txt.focus();
+  };
+  sel.addEventListener("change", sync);
+  sync();
+}
+
+// 고른 사유를 돌려준다. 직접 입력인데 비어 있으면 null (부르는 쪽에서 안내).
+function readReason(selId, txtId) {
+  const sel = $(selId), txt = $(txtId);
+  if (sel.value !== CUSTOM_PICK) return sel.value;
+  const v = txt.value.trim();
+  if (!v) return null;
+  return [...v].slice(0, REASON_TXT_MAX).join("");
+}
+
 const reasonOf = (it) => it.reason || NO_REASON;
 
 // scanReasons 가 null 이면 전체. Set 이면 그 사유만.
@@ -726,7 +813,12 @@ $("btnBulkAdd").addEventListener("click", async () => {
     alert("식별 코드를 찾지 못했습니다.");
     return;
   }
-  const reason = $("bulkReason").value;
+  const reason = readReason("bulkReason", "bulkReasonTxt");
+  if (reason === null) {
+    alert("사유를 직접 입력하기로 했는데 비어 있습니다.");
+    $("bulkReasonTxt").focus();
+    return;
+  }
   const known = new Set(state.watchlist.map((t) => t.value));
   const fresh = codes.filter((c) => !known.has(c));
   if (!fresh.length) {
@@ -1004,7 +1096,12 @@ $("btnQuickScan").addEventListener("click", () => {
   document.querySelector('.seg[data-seg="scan"]').click();
 });
 
-$("listSearch").addEventListener("input", render);
+$("listSearch").addEventListener("input", () => { editingRow = -1; render(); });
+$("listFilter").addEventListener("change", () => { editingRow = -1; render(); });
+
+// 사유 드롭다운에서 '직접 입력'을 고르면 텍스트 칸이 나오게 한다.
+bindReasonPicker("newReason", "newReasonTxt");
+bindReasonPicker("bulkReason", "bulkReasonTxt");
 
 $("btnRecheck").addEventListener("click", () => {
   if (!state.watchlist.length) return;

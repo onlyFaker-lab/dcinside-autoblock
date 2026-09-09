@@ -94,7 +94,10 @@
           <option>음란성</option><option>광고</option><option>욕설</option>
           <option>도배</option><option>혐오 콘텐츠</option>
           <option>저작권 침해</option><option>명예훼손</option>
+          <option value="__custom__">직접 입력</option>
         </select>
+        <input id="newReasonTxt" type="text" class="hidden"
+               maxlength="20" placeholder="사유 20자 이내" style="width:130px">
         <input id="newMemo" type="text" placeholder="메모 (선택)">
         <button id="btnAdd" class="primary">추가</button>
         <button id="btnBulkToggle" class="linkbtn">여러 명 한 번에</button>
@@ -117,7 +120,10 @@
             <option>음란성</option><option>광고</option><option>욕설</option>
             <option>도배</option><option>혐오 콘텐츠</option>
             <option>저작권 침해</option><option>명예훼손</option>
+            <option value="__custom__">직접 입력</option>
           </select>
+          <input id="bulkReasonTxt" type="text" class="hidden"
+                 maxlength="20" placeholder="사유 20자 이내" style="width:130px">
           <span id="bulkCount" class="muted small"></span>
           <button id="btnBulkAdd" class="primary">명단에 추가</button>
         </div>
@@ -128,7 +134,12 @@
       </p>
 
       <div class="addrow">
-        <input id="listSearch" type="text" placeholder="식별코드 · 메모로 찾기" style="flex:1">
+        <input id="listSearch" type="text" placeholder="식별코드 · 메모 · 사유로 찾기" style="flex:1">
+        <select id="listFilter">
+          <option value="all">전체</option>
+          <option value="on">사용만</option>
+          <option value="off">중지만</option>
+        </select>
         <span id="listCount" class="muted small" style="align-self:center"></span>
         <button id="btnRecheck">전체 다시 확인</button>
       </div>
