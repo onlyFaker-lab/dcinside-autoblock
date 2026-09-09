@@ -223,7 +223,15 @@ console.log("\n[4] 명단 파일을 다시 불러오면 사유와 메모가 살�
   ok("공백 있는 사유도 보존", wl[1].reason === "혐오 콘텐츠", wl[1].reason);
   ok("메모 복원", wl[0].memo === "짤 도배범", wl[0].memo);
   ok("사용 여부 복원", wl[1].enabled === false);
-  ok("모르는 사유는 음란성으로", wl[2].reason === "음란성", wl[2].reason);
+  // 예전엔 드롭다운 7개에 없으면 '음란성'으로 바꿨다. 그게 파딱 갤 4533명을
+  // 통째로 음란성으로 만든 원인이다. 완장들은 '직접 입력'을 주로 쓴다.
+  ok("직접 입력 사유는 원문 그대로", wl[2].reason === "정치갤러", wl[2].reason);
+
+  // 사유 칸이 아예 없는 항목만 음란성으로 간다. 이건 복원할 방법이 없다.
+  await seed({});
+  await sandbox.importItems([{ code: "leaf4517", memo: "", enabled: true }], null);
+  ok("사유 없는 항목만 음란성", stored.watchlist[0].reason === "음란성",
+     stored.watchlist[0].reason);
 
   // 옛 파일(formatVersion 1, 메모 없음)도 그대로 읽혀야 한다
   await seed({});

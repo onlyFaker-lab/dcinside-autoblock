@@ -18,6 +18,68 @@ export const REASON_VALUES = {
   "혐오 콘텐츠": "5", "저작권 침해": "6", "명예훼손": "7",
 };
 
+// 디시 차단 창의 사유는 라디오 7개 + '직접 입력' 칸이다. 직접 입력을 고르면
+// avoid_reason 이 "0" 으로 가고 실제 사유는 avoid_reason_txt 로 간다.
+// 2026-09-09 파딱 갤의 실제 요청으로 확인했다. '직접 입력'이 여덟 번째
+// 라디오라 8일 거라고 짐작했는데 0이었다. 넣어보기 전에 확인해서 다행이다.
+export const CUSTOM_REASON = "0";
+
+// 입력칸 안내가 '한글 20자 이내'다. 파딱 갤 4533명의 사유 중 가장 긴 것이
+// 정확히 20자라 지금은 넘는 게 없지만, 경계선이라 자르는 처리는 둔다.
+export const REASON_TXT_MAX = 20;
+
+// 사유 하나를 요청 두 칸으로 바꾼다. 아는 사유면 번호로, 모르는 사유면
+// 0 + 원문으로 보낸다. 잘렸는지는 부르는 쪽이 알아야 하므로 같이 돌려준다.
+export function reasonFields(reason) {
+  const text = String(reason ?? "").trim();
+  const known = REASON_VALUES[text];
+  if (known) return { value: known, txt: "", custom: false, cut: false };
+  if (!text) throw new Error("사유가 비어 있습니다");
+  const txt = [...text].slice(0, REASON_TXT_MAX).join("");
+  return { value: CUSTOM_REASON, txt, custom: true, cut: txt !== text };
+}
+
+// 갤로그 점검을 누가 받을지 고른다. background.js 안에 두면 테스트가 규칙을
+// 베껴 적게 되고, 그러면 실제 코드가 바뀌어도 검사가 통과해버린다.
+//
+// 이 점검이 답하려는 질문은 '이 사람이 N개월간 디시에서 아무것도 안 했나'다.
+// 답은 예전 숫자와 지금 숫자를 견주어야 나온다. 예전 숫자를 잰 지 N개월이
+// 안 됐다면 지금 다시 재도 답이 안 나오므로 볼 필요가 없다. 중간에 몇 번을
+// 더 재든 판정은 '처음 잰 값과 지금 값이 같은가'로 똑같다.
+export const GALLOG_RECHECK_GAP_MS = 12 * 3600 * 1000;
+
+export function pickGallogTargets(watchlist, opts = {}) {
+  const now = opts.now || Date.now();
+  const limit = Math.max(0, Number(opts.limit) || 0);
+  const months = Math.max(0, Number(opts.months) || 0);
+  const gap = opts.gapMs == null ? GALLOG_RECHECK_GAP_MS : opts.gapMs;
+  const periodMs = months * 30 * 24 * 3600 * 1000;
+  const pick = opts.onlyCodes ? new Set(opts.onlyCodes) : null;
+
+  let eligible = (watchlist || [])
+    .filter((t) => t && t.kind === "code" && t.gallogState !== "deleted");
+  if (pick) eligible = eligible.filter((t) => pick.has(t.value));
+
+  const rested = (t) => now - (t.gallogCheckedAt || 0) >= gap;
+
+  const fresh = eligible.filter((t) => !rested(t));
+  // 기준점이 아직 기간 안에 드는 사람. 한 번도 안 잰 사람은 여기 안 들어간다.
+  const tooSoon = periodMs
+    ? eligible.filter((t) => t.gallogCountedAt && rested(t) &&
+        now - t.gallogCountedAt < periodMs)
+    : [];
+  const soon = new Set(tooSoon);
+
+  // 숫자를 한 번도 못 읽은 사람이 먼저다. gallogCountedAt은 성공했을 때만 찍힌다.
+  // gallogCheckedAt으로 정렬하면 실패한 사람도 '방금 봤다'고 처리돼 뒤로 밀린다.
+  const ready = eligible
+    .filter((t) => rested(t) && !soon.has(t))
+    .sort((a, b) => (a.gallogCountedAt || 0) - (b.gallogCountedAt || 0));
+
+  const targets = limit ? ready.slice(0, limit) : ready;
+  return { targets, fresh, tooSoon, waiting: ready.length - targets.length };
+}
+
 export function labelForHours(hours) {
   for (const [label, h] of Object.entries(HOURS_BY_LABEL)) {
     if (h === hours) return label;
@@ -538,8 +600,12 @@ function serverMessage(text) {
 export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, onProgress) {
   if (!codes.length) return { ok: true, verified: [], failed: [] };
 
-  const reasonValue = REASON_VALUES[reason];
-  if (!reasonValue) throw new Error(`알 수 없는 사유: ${reason}`);
+  // 예전엔 모르는 사유면 여기서 던졌다. 파딱 갤 명단 4533명은 전원이
+  // 직접 입력 사유라 한 명도 재차단되지 않았을 것이다.
+  const rf = reasonFields(reason);
+  if (rf.cut && onProgress) {
+    onProgress(`  사유가 ${REASON_TXT_MAX}자를 넘어 '${rf.txt}'로 줄여 보냅니다.`);
+  }
 
   const ciT = await getCiToken();
   const batches = chunkCodes(codes);
@@ -558,8 +624,8 @@ export async function blockCodes(galleryId, codes, reason, hours = HOURS_31D, on
       _GALLTYPE_: "M",
       user_codes: batches[i].join("\n"),
       avoid_hour: String(hours),
-      avoid_reason: reasonValue,
-      avoid_reason_txt: "",
+      avoid_reason: rf.value,
+      avoid_reason_txt: rf.txt,
     });
 
     const res = await fetch(AVOID_API, {

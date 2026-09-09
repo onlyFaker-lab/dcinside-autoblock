@@ -353,3 +353,13 @@ input[type=checkbox].sw:focus-visible { outline: 2px solid var(--accent-hover); 
 
 .findbox { border: none; border-radius: 12px; padding: 14px 16px; }
 .startbox { border: none; border-radius: 12px; background: var(--panel); border-left: 3px solid var(--accent); border-radius: 0 12px 12px 0; }
+
+/* '할 일' 탭에서 바로 누르는 불러오기. 후보 표와 작업 기록 사이에 둔다. */
+.quickbox {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+.quickbox .addrow { margin-bottom: 6px; }
+.quickbox p:last-child { margin-bottom: 0; }

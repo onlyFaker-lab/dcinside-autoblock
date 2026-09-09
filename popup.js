@@ -35,6 +35,7 @@ async function load() {
     history: s.history || [],
     logs: s.logs || [],
     status: s.status || { text: "대기 중", busy: false, busySince: 0 },
+    lastScanAt: s.lastScanAt || 0,
   };
 
   // 명단 채우기를 다시 돌리면 체크 상태를 처음으로 되돌린다.
@@ -83,6 +84,7 @@ function nextCheckText() {
 }
 
 function render() {
+  renderQuickScan();
   $("statusText").textContent = state.status.text;
   $("nextCheck").textContent = nextCheckText();
   const busy = isBusy(state.status);
@@ -397,6 +399,11 @@ const scanUnchecked = new Set();
 let lastImportsAt = 0;
 const NO_REASON = "(사유 없음)";
 const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", "저작권 침해", "명예훼손"];
+
+// 디시 차단 창의 '직접 입력' 칸 안내가 '한글 20자 이내'다.
+// popup.js 는 dc.js 를 가져오지 않으므로 여기 적어둔다.
+// 두 값이 어긋나면 test.mjs 가 실패한다.
+const REASON_TXT_MAX = 20;
 const reasonOf = (it) => it.reason || NO_REASON;
 
 // scanReasons 가 null 이면 전체. Set 이면 그 사유만.
@@ -616,7 +623,7 @@ async function importItems(items, exportedAt) {
   const known = new Set(state.watchlist.map((t) => t.value));
   const seen = new Set();
   const fresh = [];
-  const unknownReasons = new Map();     // 우리가 모르는 사유 → 몇 명
+  const tooLong = new Map();     // 20자 넘는 사유 → 몇 명
   let noReason = 0;                     // 사유 칸이 아예 없던 사람
 
   for (const it of items) {
@@ -625,18 +632,21 @@ async function importItems(items, exportedAt) {
     seen.add(code);
 
     const given = String(it.reason || "").trim();
-    const ok = REASONS.includes(given);
-    // 모르는 사유를 조용히 '음란성'으로 바꾸면, 나중에 그 사유로 재차단된다.
-    // 바꾸는 건 어쩔 수 없지만 몇 명이 그렇게 됐는지는 알려준다.
-    if (given && !ok) unknownReasons.set(given, (unknownReasons.get(given) || 0) + 1);
-    // 사유 칸이 아예 없는 파일도 조용히 음란성이 됐다. 옛 버전으로 내보낸
-    // 파일이 그렇다. 파딱이 "사유가 전부 음란성으로 통일된다"고 한 게 이것으로
-    // 보인다. 위의 조건은 given이 비어 있으면 타지 않아서 아무 말도 안 했다.
+    // 예전엔 드롭다운 7개에 없는 사유를 전부 '음란성'으로 바꿨다. 그런데
+    // 완장들은 퀵차단의 '직접 입력'을 주로 쓴다. 파딱 갤 명단 4533명은
+    // 전원이 직접 입력 사유('벌레' 4287명 등)라 통째로 음란성이 됐다.
+    // 이제는 원문을 그대로 두고, 보낼 때 avoid_reason_txt 로 나간다.
+    if (given && !REASONS.includes(given)) {
+      if ([...given].length > REASON_TXT_MAX) {
+        tooLong.set(given, (tooLong.get(given) || 0) + 1);
+      }
+    }
+    // 사유 칸이 비어 있는 것만은 어쩔 수 없다. 몇 명인지 알려준다.
     if (!given) noReason++;
 
     fresh.push({
       code,
-      reason: ok ? given : "음란성",
+      reason: given || "음란성",
       memo: typeof it.memo === "string" ? it.memo : "",
       enabled: it.enabled !== false,
     });
@@ -651,16 +661,16 @@ async function importItems(items, exportedAt) {
   for (const f of fresh) byReason[f.reason] = (byReason[f.reason] || 0) + 1;
   const detail = Object.entries(byReason).map(([r, n]) => `  ${r} ${n}명`).join("\n");
   const memos = fresh.filter((f) => f.memo).length;
-  const odd = [...unknownReasons.entries()]
+  const odd = [...tooLong.entries()]
     .map(([r, n]) => `  '${r}' ${n}명`).join("\n");
 
   if (!confirm(
     `${fresh.length}명을 명단에 추가합니다.\n\n${detail}\n` +
     (memos ? `\n메모 ${memos}건도 같이 들어갑니다.\n` : "") +
-    (odd ? `\n[주의] 모르는 사유가 있어 '음란성'으로 넣습니다:\n${odd}\n` : "") +
+    (odd ? `\n[주의] 사유가 ${REASON_TXT_MAX}자를 넘어 재차단할 때 줄여서 보냅니다:\n${odd}\n` : "") +
     (noReason
       ? `\n[주의] ${noReason}명은 파일에 사유가 없어 '음란성'으로 넣습니다.\n` +
-        `  옛 버전으로 내보낸 파일일 수 있습니다. 추가한 뒤 명단 탭에서 사유를 고쳐주세요.\n`
+        `  추가한 뒤 명단 탭에서 사유를 고쳐주세요.\n`
       : "") +
     (dup ? `\n(이미 있거나 중복인 ${dup}명은 건너뜁니다)\n` : "") +
     (exportedAt ? `\n파일 만든 시각: ${new Date(exportedAt).toLocaleString("ko-KR")}` : "")
@@ -832,7 +842,9 @@ $("btnGallog").addEventListener("click", () => {
     `빠르게 많이 조회하면 디시가 IP를 막습니다. 일부러 천천히 돕니다.\n` +
     `한 번에 너무 많이 잡지 마세요.\n\n시작할까요?`
   )) return;
-  chrome.runtime.sendMessage({ type: "gallog", limit });
+  chrome.runtime.sendMessage({
+    type: "gallog", limit, months: Number($("cleanMonths").value) || 0,
+  });
 });
 
 $("cleanBody").addEventListener("change", (e) => {
@@ -938,7 +950,58 @@ $("btnScanAdd").addEventListener("click", async () => {
   for (const code of picked) scanUnchecked.delete(code);
   await chrome.storage.local.set({ watchlist: state.watchlist, imports: state.imports });
   render();
-  alert(`${added}명을 명단에 추가했습니다.`);
+
+  // 갤로그 기록은 나중에 한꺼번에 하면 수천 명이 되어 두 시간씩 걸린다.
+  // 담을 때 그 사람들만 미리 해두면 채우기를 하는 날마다 저절로 나뉜다.
+  // 총 요청 수는 같지만 한 번에 몰리지 않는다.
+  if ($("scanWithGallog").checked && added) {
+    alert(`${added}명을 명단에 추가했습니다.\n이어서 이 사람들의 갤로그 숫자를 기록합니다.`);
+    chrome.runtime.sendMessage({
+      type: "gallog", limit: added, months: 0, codes: picked,
+    });
+  } else {
+    alert(`${added}명을 명단에 추가했습니다.`);
+  }
+});
+
+// ── '할 일' 탭에서 한 번에 불러오기 ────────────────────────
+// 응원갤은 경기가 없는 날도 하루 100명씩 차단된다고 한다. 그걸 담으려면
+// 지금은 명단 탭 → 채우기 탭 → 날짜 고르기 → 불러오기로 네 번을 눌러야 한다.
+// 자주 하는 일치고 번거로워서 한 번에 끝나게 한다.
+function quickScanFrom() {
+  const last = Number(state.lastScanAt) || 0;
+  // 처음이면 최근 7일. 마지막으로 불러온 날부터 보면 빠진 날이 없다.
+  const from = last ? new Date(last) : new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  return from;
+}
+
+function renderQuickScan() {
+  const last = Number(state.lastScanAt) || 0;
+  $("quickScanWhen").textContent = last
+    ? `마지막으로 불러온 때: ${new Date(last).toLocaleString("ko-KR")}`
+    : "아직 불러온 적이 없습니다. 최근 7일치를 봅니다.";
+}
+
+$("btnQuickScan").addEventListener("click", () => {
+  const from = quickScanFrom();
+  const until = `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, "0")}-` +
+                `${String(from.getDate()).padStart(2, "0")}`;
+  if (!confirm(
+    `${until} 이후의 31일 차단을 불러옵니다.\n\n` +
+    `갤이 크면 몇 분 걸립니다. 창을 닫아도 계속 진행됩니다.\n\n시작할까요?`
+  )) return;
+
+  // 채우기 화면과 값을 맞춰둔다. 끝나고 넘어갔을 때 무엇으로 불러온
+  // 결과인지 화면에 그대로 보여야 한다.
+  $("scanUntil").value = until;
+  syncScanInputs();
+  chrome.runtime.sendMessage({
+    type: "scan", pages: scanPagesToUse(), until, includeReleased: false,
+  });
+
+  // 결과는 채우기 화면에 쌓이므로 미리 그쪽으로 옮겨둔다.
+  document.querySelector('.tab[data-tab="mgmt"]').click();
+  document.querySelector('.seg[data-seg="scan"]').click();
 });
 
 $("listSearch").addEventListener("input", render);

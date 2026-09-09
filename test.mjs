@@ -14,6 +14,7 @@ import {
   expiresAt, isManualRelease, labelForHours,
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
+  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets,
 } from "./dc.js";
 import { readFileSync } from "node:fs";
 
@@ -864,6 +865,107 @@ console.log("\n[16] 판정 이어가기");
   eq("빈 목록", carryOver(undefined, new Set(), watched).length, 0);
   eq("code 없는 항목은 버림",
      carryOver([{ nick: "ㅇㅇ" }, null], new Set(), watched).length, 0);
+}
+
+// ── [18] 직접 입력 사유 ────────────────────────────────────
+// 디시 차단 창은 라디오 7개 + '직접 입력'이다. 완장들은 직접 입력을 주로 쓴다.
+// 예전 코드는 모르는 사유면 던져서, 파딱 갤 명단 4533명(전원 직접 입력 사유)이
+// 한 명도 재차단되지 않았을 것이다. 실제 요청으로 avoid_reason=0 을 확인했다.
+{
+  console.log("\n[18] 직접 입력 사유");
+  const known = reasonFields("광고");
+  eq("아는 사유는 번호로", known.value, REASON_VALUES["광고"]);
+  eq("아는 사유는 txt 비움", known.txt, "");
+  ok("아는 사유는 직접 입력 아님", known.custom === false);
+
+  const custom = reasonFields("벌레");
+  eq("모르는 사유는 0", custom.value, CUSTOM_REASON);
+  eq("모르는 사유는 원문을 txt로", custom.txt, "벌레");
+  ok("모르는 사유는 직접 입력", custom.custom === true);
+  ok("안 잘림", custom.cut === false);
+
+  // 파딱 갤에서 가장 긴 사유가 정확히 20자였다. 경계에서 안 잘려야 한다.
+  const edge = "한생갤에 글 쓰려다 착오한 구맘인 듯";
+  eq("20자 사유 길이 확인", [...edge].length, REASON_TXT_MAX);
+  eq("20자는 그대로", reasonFields(edge).txt, edge);
+  ok("20자는 안 잘림", reasonFields(edge).cut === false);
+
+  const long = "가".repeat(25);
+  eq("20자 넘으면 자름", [...reasonFields(long).txt].length, REASON_TXT_MAX);
+  ok("잘렸다고 알려줌", reasonFields(long).cut === true);
+
+  eq("앞뒤 공백은 버림", reasonFields("  벌레  ").txt, "벌레");
+  ok("빈 사유는 거절", (() => {
+    try { reasonFields("   "); return false; } catch { return true; }
+  })());
+
+  // 화면과 코드가 같은 한도를 봐야 한다. popup.js 는 dc.js 를 가져오지 않는다.
+  const pjs = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
+  const m = pjs.match(/REASON_TXT_MAX\s*=\s*(\d+)/);
+  ok("popup.js 한도가 dc.js와 같다", m && Number(m[1]) === REASON_TXT_MAX,
+     m ? `popup ${m[1]} / dc ${REASON_TXT_MAX}` : "popup.js에 없음");
+}
+
+// ── [19] 갤로그 점검 대상 고르기 ──────────────────────────
+// 명단 4533명을 매번 다 도는 건 두 시간짜리다. 기준점을 잰 지 기간이
+// 안 지난 사람은 지금 다시 재도 판정이 안 나오므로 볼 필요가 없다.
+// background.js가 쓰는 그 함수를 그대로 부른다.
+{
+  console.log("\n[19] 갤로그 점검 대상 고르기");
+  const HOUR = 3600 * 1000, DAY = 24 * HOUR;
+  const now = Date.now();
+  const C = (value, extra = {}) => ({ kind: "code", value, ...extra });
+
+  const list = [
+    C("never"),                                                     // 한 번도 안 잼
+    C("old",    { gallogCountedAt: now - 100 * DAY, gallogCheckedAt: now - 100 * DAY }),
+    C("recent", { gallogCountedAt: now - 30 * DAY,  gallogCheckedAt: now - 30 * DAY }),
+    C("justnow",{ gallogCountedAt: now - HOUR,      gallogCheckedAt: now - HOUR }),
+    C("gone",   { gallogState: "deleted" }),
+    { kind: "ip", value: "1.2.3.4" },
+  ];
+  const names = (r) => r.targets.map((t) => t.value);
+
+  const r3 = pickGallogTargets(list, { now, months: 3, limit: 50 });
+  ok("한 번도 안 잰 사람이 먼저", names(r3)[0] === "never", names(r3).join(","));
+  ok("기준점이 낡은 사람은 본다", names(r3).includes("old"), names(r3).join(","));
+  ok("기간 안에 잰 사람은 건너뛴다", !names(r3).includes("recent"), names(r3).join(","));
+  ok("12시간 안에 본 사람은 건너뛴다", !names(r3).includes("justnow"), names(r3).join(","));
+  ok("탈퇴 확인된 사람은 안 본다", !names(r3).includes("gone"), names(r3).join(","));
+  ok("IP는 갤로그가 없다", !names(r3).includes("1.2.3.4"), names(r3).join(","));
+  eq("건너뛴 이유를 센다 — 방금 본 사람", r3.fresh.length, 1);
+  eq("건너뛴 이유를 센다 — 아직 이른 사람", r3.tooSoon.length, 1);
+
+  // 기간을 넓히면 볼 사람이 줄어야 한다. 이게 파딱이 말한 부담 줄이기다.
+  eq("3개월 기준 대상 수", r3.targets.length, 2);
+  eq("12개월 기준 대상 수", pickGallogTargets(list, { now, months: 12, limit: 50 }).targets.length, 1);
+
+  // 기간을 0으로 주면(담으면서 미리 기록) 기간 규칙은 안 쓴다.
+  const r0 = pickGallogTargets(list, { now, months: 0, limit: 50 });
+  ok("기간 0이면 기간 규칙 없음", names(r0).includes("recent"), names(r0).join(","));
+
+  const cut = pickGallogTargets(list, { now, months: 3, limit: 1 });
+  eq("상한을 넘지 않는다", cut.targets.length, 1);
+  eq("남은 사람을 센다", cut.waiting, 1);
+
+  // 채우기에서 방금 담은 사람만 미리 기록할 때 쓴다.
+  const only = pickGallogTargets(list, { now, months: 0, limit: 50, onlyCodes: ["old"] });
+  eq("지정한 사람만", names(only).join(","), "old");
+}
+
+// ── [20] 로그인이 풀렸을 때도 셀 수 있는 것 ────────────────
+// 차단 목록을 못 읽어도 만료 예정 시각은 명단에 저장돼 있다.
+{
+  console.log("\n[20] 로그인 없이 아는 것");
+  const now = Date.now();
+  const wl = [
+    { value: "a", nextCheckAt: now - 1000 },      // 지났다
+    { value: "b", nextCheckAt: now + 86400000 },  // 아직
+    { value: "c", nextCheckAt: 0 },               // 예약 없음
+    { value: "d", nextCheckAt: now - 99999 },     // 지났다
+  ];
+  const waiting = wl.filter((t) => t.nextCheckAt && now >= t.nextCheckAt).length;
+  eq("만료 예정 시각이 지난 사람 수", waiting, 2);
 }
 
 // ── [17] 설정 화면에 적힌 기본값 ──────────────────────────

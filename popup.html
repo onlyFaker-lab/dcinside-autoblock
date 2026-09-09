@@ -60,6 +60,18 @@
       </table>
     </div>
 
+    <div class="quickbox">
+      <div class="addrow">
+        <button id="btnQuickScan" class="primary">밀린 31일 차단 불러오기</button>
+        <span id="quickScanWhen" class="muted small"></span>
+      </div>
+      <p class="muted small">
+        마지막으로 불러온 날 이후만 훑습니다. 처음이면 최근 7일치를 봅니다.
+        다 불러오면 <b>명단 → 채우기</b>로 넘어갑니다. 날짜나 페이지 수를
+        직접 고르고 싶으면 그쪽에서 하면 됩니다.
+      </p>
+    </div>
+
     <div class="logbox">
       <h4>작업 기록</h4>
       <div id="logs"></div>
@@ -141,7 +153,7 @@
         <button id="btnScan" class="primary">31일 차단 불러오기</button>
         <label id="scanPagesLabel" class="inline muted small">
           최대
-          <input id="scanPages" type="number" min="1" max="3000" value="10" style="width:70px">
+          <input id="scanPages" type="number" min="1" max="3000" value="140" style="width:70px">
           페이지
         </label>
         <label class="inline muted small" style="margin-left:10px">
@@ -161,6 +173,10 @@
         <button id="btnScanAll" class="linkbtn">보이는 사람 전체 선택</button>
         <button id="btnScanNone" class="linkbtn">전체 해제</button>
         <span id="scanCount" class="muted small"></span>
+        <label class="inline muted small">
+          <input id="scanWithGallog" type="checkbox" class="sw">
+          담으면서 갤로그 숫자도 기록
+        </label>
         <button id="btnScanAdd" class="primary">선택한 사람 명단에 추가</button>
       </div>
 
@@ -206,6 +222,12 @@
           것입니다. 위에서 고른 기간만큼 숫자가 그대로면 아래 목록에 올라옵니다.
           <b>첫 점검에서는 비교할 대상이 없어 아무것도 나오지 않습니다.</b>
           한 번 더 돌려야 뜻이 생깁니다.
+        </p>
+        <p class="muted small">
+          <b>한 번 누르면 위에 적은 인원만 보고 끝납니다.</b> 쉬었다 이어서
+          하는 게 아니라, 다시 누르면 다음 사람들입니다. 오래 안 본 사람부터
+          돕니다. 이미 기록해둔 지 위 기간이 안 지난 사람은 건너뜁니다 —
+          기간이 지나야 비교할 뜻이 생기기 때문입니다.
         </p>
         <p class="warn small">
           천천히 돕니다. 한 명당 한 번씩 요청하는데, 빠르게 많이 보내면 디시가

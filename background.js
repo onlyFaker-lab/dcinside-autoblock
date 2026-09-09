@@ -5,7 +5,7 @@
 
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
-  collectActivity, checkGallog,
+  collectActivity, checkGallog, pickGallogTargets,
   isBusy, localDateKey, jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK,
   rowHealth, carryOver,
 } from "./dc.js";
@@ -238,6 +238,16 @@ async function runCheck({ auto = false } = {}) {
     }
   } catch (e) {
     await log(`[오류] ${e.message}`);
+    // 로그인이 풀렸거나 권한이 없으면 여기로 온다. 그런데 만료 예정 시각은
+    // 이미 명단에 저장돼 있어서 디시에 묻지 않고도 셀 수 있다. 아무 말도 안
+    // 하면 완장은 그냥 창을 닫고, 재차단할 사람이 있어도 모르고 지나간다.
+    const waiting = enabled.filter((t) => t.nextCheckAt && now >= t.nextCheckAt).length;
+    if (waiting) {
+      await log(
+        `  저장된 기록으로는 ${waiting}명이 이미 만료 예정 시각을 지났습니다. ` +
+        `디시에 로그인한 뒤 다시 확인해 주세요.`
+      );
+    }
     await setStatus("오류 발생", false);
     await saveWatchlistUpdates(updates);
     return { ok: false, error: e.message };
@@ -547,8 +557,11 @@ async function runScan(pages = 10, untilDate = "", includeReleased = false) {
           (untilDate ? `, 아직 ${untilDate}까지 못 갔습니다` : "") + ")"
         : "")
     );
+    // 다음에 '할 일' 탭에서 한 번에 불러올 때 어디부터 보면 되는지 쓴다.
+    // 완장이 매번 날짜를 고르지 않아도 되게 하려는 것이다.
+    await chrome.storage.local.set({ lastScanAt: Date.now() });
     await setStatus(`명단 후보 ${fresh.length}명`, false);
-    return { ok: true };
+    return { ok: true, found: fresh.length };
   } catch (e) {
     await log(`[오류] ${e.message}`);
     await setStatus("오류 발생", false);
@@ -712,7 +725,7 @@ async function runActivity(months = 3, maxPages = 2000) {
 //   1. 간격을 1200ms로 늘리고 난수로 흔든다 (일정한 간격 자체가 신호다)
 //   2. 기본 인원을 50명으로 줄인다. 오래된 사람부터 도니 며칠에 걸쳐 다 돈다
 //   3. 연속으로 실패하면 즉시 멈춘다. 이미 막힌 뒤에 계속 두드리지 않는다
-async function runGallog(limit = 50) {
+async function runGallog(limit = 50, months = 0, onlyCodes = null) {
   const { watchlist, status } = await getState();
   if (isBusy(status)) {
     await log("이미 다른 작업이 돌고 있습니다.");
@@ -720,27 +733,21 @@ async function runGallog(limit = 50) {
   }
 
   const now = Date.now();
-  // 방금 확인한 사람을 또 두드리지 않는다. 실수로 두 번 눌러도 부담이 안 생긴다.
-  // 하루 한 번 도는 평소 사용에는 걸리지 않는 간격이다.
-  const RECHECK_GAP_MS = 12 * 3600 * 1000;
 
-  // 이미 탈퇴로 확인된 사람은 다시 안 본다.
-  const eligible = watchlist.filter((t) => t.kind === "code" && t.gallogState !== "deleted");
-  const fresh = eligible.filter((t) => now - (t.gallogCheckedAt || 0) < RECHECK_GAP_MS);
-
-  // 숫자를 한 번도 못 읽은 사람이 먼저다. gallogCountedAt은 성공했을 때만 찍힌다.
-  // gallogCheckedAt으로 정렬하면 실패한 사람도 '방금 봤다'고 처리돼 뒤로 밀린다.
-  const targets = eligible
-    .filter((t) => now - (t.gallogCheckedAt || 0) >= RECHECK_GAP_MS)
-    .sort((a, b) => (a.gallogCountedAt || 0) - (b.gallogCountedAt || 0))
-    .slice(0, limit);
+  // 누구를 볼지는 dc.js가 정한다. 규칙을 여기 두면 검사가 그 규칙을 베껴
+  // 적게 되고, 그러면 실제 코드가 바뀌어도 검사가 통과해버린다.
+  const { targets, fresh, tooSoon, waiting } =
+    pickGallogTargets(watchlist, { now, limit, months, onlyCodes });
 
   if (!targets.length) {
-    if (fresh.length) {
-      await log(`갤로그를 확인할 대상이 없습니다. ${fresh.length}명은 12시간 안에 이미 확인했습니다.`);
-    } else {
-      await log("갤로그를 확인할 대상이 없습니다.");
+    const why = [];
+    if (fresh.length) why.push(`${fresh.length}명은 12시간 안에 이미 확인했습니다`);
+    if (tooSoon.length) {
+      why.push(`${tooSoon.length}명은 기록한 지 ${months}개월이 안 돼 아직 볼 필요가 없습니다`);
     }
+    await log(
+      "갤로그를 확인할 대상이 없습니다." + (why.length ? ` ${why.join(". ")}.` : "")
+    );
     return { ok: true, checked: 0 };
   }
 
@@ -752,9 +759,20 @@ async function runGallog(limit = 50) {
   await log(`갤로그 점검: ${targets.length}명을 확인합니다. 한 명당 한 번씩 요청합니다.`);
   await log(`  글·댓글 수도 같이 기록합니다. 다음 점검 때와 비교해 변동이 없으면 알려줍니다.`);
   await log(`  ${eta}쯤 걸립니다. 디시가 IP를 막지 않도록 일부러 천천히 돕니다.`);
+  await log(
+    `  한 번 누르면 ${targets.length}명만 보고 끝납니다. ` +
+    `다시 누르면 다음 사람들입니다. 오래 안 본 사람부터 돕니다.`
+  );
   if (fresh.length) {
     await log(`  (12시간 안에 확인한 ${fresh.length}명은 건너뜁니다)`);
   }
+  if (tooSoon.length) {
+    await log(
+      `  (기록한 지 ${months}개월이 안 된 ${tooSoon.length}명은 건너뜁니다. ` +
+      `기간이 지나야 비교할 뜻이 생깁니다)`
+    );
+  }
+  if (waiting > 0) await log(`  (${waiting}명은 다음 차례입니다)`);
 
   const tally = { deleted: 0, notfound: 0, alive: 0, other: 0, error: 0 };
   let counted = 0, uncounted = 0;
@@ -851,7 +869,8 @@ async function runGallog(limit = 50) {
     if (tally.notfound) {
       await log(`  [안내] 404가 나온 코드는 자동으로 지우지 않습니다. 직접 확인해 주세요.`);
     }
-    const left = eligible.length - done - fresh.length;
+    // 이번에 못 본 사람. tooSoon은 '아직 볼 필요가 없는' 사람이라 빼고 센다.
+    const left = targets.length - done + waiting;
     if (left > 0) {
       await log(`  아직 ${left}명이 남았습니다. 다음에 다시 누르면 이어서 봅니다.`);
     }
@@ -884,7 +903,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       else if (msg.type === "scan") sendResponse(await runScan(msg.pages, msg.until, msg.includeReleased));
       else if (msg.type === "recheckAll") sendResponse(await runRecheckAll());
       else if (msg.type === "activity") sendResponse(await runActivity(msg.months, msg.pages));
-      else if (msg.type === "gallog") sendResponse(await runGallog(msg.limit));
+      else if (msg.type === "gallog") sendResponse(await runGallog(msg.limit, msg.months, msg.codes));
       else sendResponse({ ok: false, error: "알 수 없는 요청" });
     } catch (e) {
       await log(`[오류] ${e.message}`);
