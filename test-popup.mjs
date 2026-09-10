@@ -103,6 +103,7 @@ const document = {
 // ── chrome / 브라우저 API ───────────────────────────────────
 const stored = {};
 const sent = [];
+const confirmTexts = [];
 let confirmAnswer = true;
 const alerts = [];
 
@@ -120,7 +121,7 @@ const chrome = {
 const saved = [];
 const sandbox = {
   document, chrome, console,
-  confirm: () => confirmAnswer,
+  confirm: (m) => { confirmTexts.push(String(m)); return confirmAnswer; },
   alert: (m) => alerts.push(m),
   setTimeout, clearTimeout, Date, Math, JSON, Set, Map, Object, Array, String, Number,
   RegExp, Error, Promise, isNaN, parseInt, parseFloat,
@@ -523,6 +524,32 @@ console.log("\n[갤로그 기록 내보내기]");
   ok("갤로그 숫자가 들어감", file.items[0].gallogTotal === 7, String(file.items[0].gallogTotal))
   ok("잰 적 없는 사람은 칸이 없다", file.items[1].gallogTotal === undefined,
      JSON.stringify(file.items[1]));
+}
+
+
+
+// ── 실행 전 재확인 토글 ────────────────────────────────────
+// 완장이 한 명뿐인 갤에서는 조회만 늘고 얻는 게 없다. 기본은 꺼져 있어야 하고,
+// 꺼져 있으면 '다시 봅니다' 안내가 뜨면 안 된다. 그 문구가 뜨는데 실제로는
+// 안 보면, 완장은 걸러진 줄 알고 안심하게 된다.
+console.log("\n[실행 전 재확인 토글]");
+{
+  const cand = [{ code: "capture6180", label: "ㅇㅇ", reason: "벌레" }];
+
+  await seed({ candidates: cand, settings: { galleryId: "g" } });
+  ok("기본값은 꺼짐", els.get("cfgRecheck").checked === false);
+  confirmAnswer = true;
+  sent.length = 0;
+  els.get("btnApply").dispatchEvent(new sandbox.Event("click"));
+  const offMsg = confirmTexts[confirmTexts.length - 1] || "";
+  ok("꺼져 있으면 다시 본다고 하지 않음", !/다시 봅니다/.test(offMsg), offMsg);
+
+  await seed({ candidates: cand, settings: { galleryId: "g", recheckBeforeApply: true } });
+  ok("설정을 켜면 켜져 보임", els.get("cfgRecheck").checked === true);
+  els.get("btnApply").dispatchEvent(new sandbox.Event("click"));
+  const onMsg = confirmTexts[confirmTexts.length - 1] || "";
+  ok("켜져 있으면 다시 본다고 알림", /다시 봅니다/.test(onMsg), onMsg);
+  ok("이미 차단된 사람은 뺀다고 알림", /빼고 보냅니다/.test(onMsg), onMsg);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

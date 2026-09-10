@@ -18,6 +18,7 @@ const DEFAULTS = {
   sweepPerRun: 20,
   autoApply: false,
   notify: true,
+  recheckBeforeApply: false,
 };
 
 // MV3 서비스워커는 작업 도중에도 종료될 수 있다. 그러면 busy가 true인 채 남아
@@ -46,6 +47,7 @@ async function getState() {
     history: s.history || [],
     status: s.status || { text: "대기 중", busy: false, busySince: 0 },
     lastCheck: s.lastCheck || null,
+    candidatesAt: s.candidatesAt || 0,
     ranToday: s.ranToday || [],
   };
 }
@@ -303,6 +305,7 @@ async function runCheck({ auto = false } = {}) {
   await chrome.storage.local.set({
     candidates: allCandidates,
     manual: allManual,
+    candidatesAt: now,      // 이 판정이 언제 것인지. 실행 전에 낡았는지 본다.
     lastCheck: now,
   });
 
@@ -371,8 +374,63 @@ async function runCheck({ auto = false } = {}) {
 // --------------------------------------------------------------- 실행
 
 async function runApply() {
-  const { settings, candidates, history } = await getState();
+  const { settings, candidates, history, candidatesAt } = await getState();
   if (!candidates.length) return { ok: true };
+
+  // 후보 목록은 판정한 그 순간의 사진이다. 그 뒤에 다른 완장이 손으로
+  // 갱신차단을 걸면 우리는 모른다. 그 상태로 보내면 이미 차단된 사람에게
+  // 또 걸게 되고, 중복 차단은 기존 차단을 풀고 새로 걸어 만료일만 밀린다.
+  // 요청은 나갔으니 하루 차단 한도는 그대로 쓴다.
+  //
+  // 그래서 보내기 직전에 다시 조회해 이미 차단 중인 사람을 뺄 수 있다.
+  // 다만 완장이 한 명뿐인 갤에서는 겹칠 일이 없어 조회만 늘고 얻는 게 없다.
+  // 이 프로젝트는 요청 하나하나가 IP 차단과 닿아 있으므로 기본은 꺼둔다.
+  // 파딱 제안 2026-09-10: "토글형으로 넣어두는 것은 괜찮아 보인다".
+  if (settings.recheckBeforeApply) {
+    const staleMins = candidatesAt ? Math.round((Date.now() - candidatesAt) / 60000) : 0;
+    await log(
+      `보내기 전에 후보 ${candidates.length}명이 아직 풀려 있는지 다시 봅니다` +
+      (staleMins >= 1 ? ` (판정한 지 ${staleMins}분 지났습니다)` : "") + "."
+    );
+
+    const stillOpen = [];
+    const already = [];
+    for (const c of candidates) {
+      let rows;
+      try {
+        rows = await fetchRowsForCode(settings.galleryId, c.code);
+      } catch (e) {
+        // 확인하려고 켠 기능이 확인에 실패했는데 그대로 보내면 앞뒤가 안 맞는다.
+        // 로그인이 풀렸거나 IP가 막힌 것일 수 있고, 그 판정은 믿을 수 없다.
+        await log(`[중단] 다시 확인하는 중에 실패했습니다: ${e.message}`);
+        await log(`  후보는 그대로 두었습니다. 원인을 확인한 뒤 다시 실행해 주세요.`);
+        await setStatus("재확인 실패 — 실행 안 함", false);
+        return { ok: false, error: e.message };
+      }
+      const verdict = analyzeCode(rows, c.code);
+      if (verdict.status === "candidate") stillOpen.push(c);
+      else already.push(c.code);
+      await new Promise((r) => setTimeout(r, jitter(CHECK_DELAY_MS)));
+    }
+
+    if (already.length) {
+      await log(
+        `  ${candidates.length}명 중 ${already.length}명은 그 사이에 이미 차단됐습니다. ` +
+        `빼고 보냅니다. 그만큼 하루 차단 한도를 아꼈습니다.`
+      );
+    } else {
+      await log(`  ${candidates.length}명 모두 아직 풀려 있습니다.`);
+    }
+
+    if (!stillOpen.length) {
+      await log("보낼 사람이 없습니다. 후보 전원이 이미 차단돼 있습니다.");
+      await chrome.storage.local.set({ candidates: [] });
+      await setStatus("이상 없음", false);
+      return { ok: true, skipped: already.length };
+    }
+    candidates.length = 0;
+    candidates.push(...stillOpen);
+  }
 
   if (candidates.length > settings.maxPerRun) {
     await log(

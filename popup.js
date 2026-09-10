@@ -10,6 +10,7 @@ const DEFAULTS = {
   sweepPerRun: 20,
   autoApply: false,
   notify: true,
+  recheckBeforeApply: false,
 };
 
 let state = {};
@@ -36,6 +37,7 @@ async function load() {
     logs: s.logs || [],
     status: s.status || { text: "대기 중", busy: false, busySince: 0 },
     lastScanAt: s.lastScanAt || 0,
+    candidatesAt: s.candidatesAt || 0,
   };
 
   // 명단 채우기를 다시 돌리면 체크 상태를 처음으로 되돌린다.
@@ -285,6 +287,7 @@ function render() {
   $("cfgChecks").value = state.settings.maxChecksPerRun;
   $("cfgSweep").value = state.settings.sweepPerRun;
   $("cfgAuto").checked = !!state.settings.autoApply;
+  $("cfgRecheck").checked = !!state.settings.recheckBeforeApply;
   $("cfgNotify").checked = state.settings.notify !== false;
 }
 
@@ -316,7 +319,27 @@ $("btnCheck").addEventListener("click", () => {
 
 $("btnApply").addEventListener("click", () => {
   const names = state.candidates.map((c) => `· ${c.label} (${c.reason})`).join("\n");
-  if (confirm(`아래 ${state.candidates.length}명을 31일 재차단합니다.\n\n${names}\n\n실행할까요?`)) {
+  const n = state.candidates.length;
+  // 후보 목록은 판정한 그 순간의 사진이다. 그 사이에 다른 완장이 손으로
+  // 갱신차단을 걸었을 수 있다. 얼마나 지났는지는 켜고 끄고와 무관하게 알린다.
+  const recheck = state.settings.recheckBeforeApply;
+  const mins = Math.ceil((n * (1.2 + 0.5)) / 60);
+  const old = state.candidatesAt
+    ? Math.round((Date.now() - state.candidatesAt) / 60000) : 0;
+
+  if (confirm(
+    `아래 ${n}명을 31일 재차단합니다.\n\n${names}\n\n` +
+    (old >= 60
+      ? `이 후보는 판정한 지 ${Math.round(old / 60)}시간 지났습니다.\n` +
+        (recheck ? "" : "그 사이 다른 완장이 이미 차단했을 수 있습니다.\n")
+      : "") +
+    (recheck
+      ? `보내기 전에 아직 풀려 있는지 다시 봅니다. ` +
+        `${mins < 1 ? "금방" : `${mins}분쯤`} 더 걸립니다.\n` +
+        `그 사이 다른 완장이 이미 차단한 사람은 빼고 보냅니다.\n`
+      : "") +
+    `\n실행할까요?`
+  )) {
     chrome.runtime.sendMessage({ type: "apply" });
   }
 });
@@ -425,6 +448,7 @@ $("btnSave").addEventListener("click", async () => {
     maxChecksPerRun: Math.max(1, Number($("cfgChecks").value) || DEFAULTS.maxChecksPerRun),
     sweepPerRun: Math.max(0, Number($("cfgSweep").value) || 0),
     autoApply: $("cfgAuto").checked,
+    recheckBeforeApply: $("cfgRecheck").checked,
     notify: $("cfgNotify").checked,
   };
   await chrome.storage.local.set({ settings: state.settings });

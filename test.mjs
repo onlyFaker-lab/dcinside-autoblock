@@ -1053,6 +1053,31 @@ console.log("\n[16] 판정 이어가기");
   ok("잰 적 없는 기록은 무시", mergeGallog(mine, { gallogTotal: 5, gallogCountedAt: 0 }) === null);
 }
 
+// ── [23] 실행 전 재확인은 기본이 꺼짐 ──────────────────────
+// 완장이 한 명뿐인 갤에서는 조회만 늘고 얻는 게 없다. 요청 하나하나가
+// IP 차단과 닿아 있으므로, 켜는 것은 필요한 사람이 고르게 한다.
+// popup.js 와 background.js 가 각자 DEFAULTS 를 들고 있어 어긋날 수 있다.
+{
+  console.log("\n[23] 실행 전 재확인 기본값");
+  const read = (file) => {
+    const src = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+    const m = src.match(/recheckBeforeApply:\s*(true|false)/);
+    return m ? m[1] : null;
+  };
+  const p = read("popup.js"), b = read("background.js");
+  ok("popup.js 기본값이 꺼짐", p === "false", String(p));
+  ok("background.js 기본값이 꺼짐", b === "false", String(b));
+  ok("두 파일의 기본값이 같다", p === b, `popup ${p} / background ${b}`);
+
+  // 켜져 있을 때만 다시 조회해야 한다. 항상 돌면 완장 한 명짜리 갤이 손해다.
+  const bg = readFileSync(new URL("./background.js", import.meta.url), "utf8");
+  ok("설정으로 가둬져 있다",
+     /if\s*\(settings\.recheckBeforeApply\)/.test(bg));
+  // 확인하려고 켠 기능이 확인에 실패했는데 그대로 보내면 앞뒤가 안 맞는다.
+  const body = bg.slice(bg.indexOf("if (settings.recheckBeforeApply)"));
+  ok("재확인 실패하면 멈춘다", /\[중단\] 다시 확인하는 중에 실패/.test(body));
+}
+
 // ── [17] 설정 화면에 적힌 기본값 ──────────────────────────
 // 화면에 '기본값: 300'이라고 적어놓고 코드가 다른 값을 쓰면, 완장은 건드리지
 // 않은 값이 뭔지 알 수 없게 된다. 문구와 코드가 어긋나면 실패한다.
