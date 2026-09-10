@@ -34,6 +34,54 @@ export const REASON_TXT_MAX = 20;
 // '6분쯤'이라고 해놓고 8~9분이 걸려 멈춘 줄 알았다고 한다.
 export const FETCH_SECS = 0.5;
 
+// 갤로그 기록 두 벌을 합친다. 완장이 여럿이면 같은 사람을 각자 조회하게 되는데,
+// 한 명이 한 바퀴 돌고 파일로 넘기면 나머지는 조회 0번으로 기준점을 얻는다.
+// 부담이 제일 큰 첫 한 바퀴를 통째로 건너뛰는 것이다 (파딱 제안 2026-09-10).
+//
+// 합치는 규칙이 핵심이다. 최신으로 덮으면 공유할수록 기준점이 뒤로 밀려서
+// 아무도 판정을 못 받게 된다. 우리가 원하는 건 그 반대 — 창을 넓히는 것이다.
+//
+//   숫자가 같다  → 두 관측 사이에 아무 일도 없었다는 뜻이다.
+//                  처음 본 시각은 이른 쪽, 마지막으로 잰 시각은 늦은 쪽을 쓴다.
+//   숫자가 다르다 → 사이에 글을 썼다. 오래된 관측은 이미 무효다. 늦은 쪽을 통째로 쓴다.
+export function mergeGallog(mine = {}, theirs = {}) {
+  const has = (x) => x && Number.isFinite(x.gallogTotal) && x.gallogCountedAt > 0;
+  if (!has(theirs)) return null;              // 줄 게 없다
+  if (!has(mine)) return { ...pickGallog(theirs), why: "new" };
+
+  if (mine.gallogTotal === theirs.gallogTotal) {
+    const since = Math.min(mine.gallogSince || Infinity, theirs.gallogSince || Infinity);
+    const counted = Math.max(mine.gallogCountedAt, theirs.gallogCountedAt);
+    // 넓어지지 않으면 굳이 건드리지 않는다.
+    if (since >= (mine.gallogSince || Infinity) && counted <= mine.gallogCountedAt) return null;
+    const newer = theirs.gallogCountedAt > mine.gallogCountedAt ? theirs : mine;
+    return {
+      gallogTotal: mine.gallogTotal,
+      gallogSince: Number.isFinite(since) ? since : undefined,
+      gallogCountedAt: counted,
+      gallogCheckedAt: Math.max(mine.gallogCheckedAt || 0, theirs.gallogCheckedAt || 0),
+      gallogState: newer.gallogState,
+      why: "widen",
+    };
+  }
+
+  // 숫자가 다르면 늦게 잰 쪽이 지금의 사실이다.
+  if (theirs.gallogCountedAt > mine.gallogCountedAt) {
+    return { ...pickGallog(theirs), why: "replace" };
+  }
+  return null;
+}
+
+function pickGallog(x) {
+  return {
+    gallogTotal: x.gallogTotal,
+    gallogSince: x.gallogSince,
+    gallogCountedAt: x.gallogCountedAt,
+    gallogCheckedAt: x.gallogCheckedAt || x.gallogCountedAt,
+    gallogState: x.gallogState,
+  };
+}
+
 // 사유 하나를 요청 두 칸으로 바꾼다. 아는 사유면 번호로, 모르는 사유면
 // 0 + 원문으로 보낸다. 잘렸는지는 부르는 쪽이 알아야 하므로 같이 돌려준다.
 export function reasonFields(reason) {

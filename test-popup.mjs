@@ -7,6 +7,7 @@
 //   node test-popup.mjs
 
 import { readFileSync } from "node:fs";
+import * as dcMod from "./dc.js";
 import vm from "node:vm";
 
 let pass = 0, fail = 0;
@@ -131,7 +132,17 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
-const src = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
+// popup.js 는 브라우저에서 type="module" 로 실려서 import 가 된다. vm 은 안 되므로
+// import 줄만 걷어내고, 가져오려던 것을 sandbox 에 직접 넣어준다. 규칙 자체는
+// dc.js 의 진짜 함수를 그대로 쓰므로 검사가 복사본을 보는 일은 없다.
+const raw = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
+const wanted = [...raw.matchAll(/import\s*\{([^}]+)\}\s*from\s*"\.\/dc\.js";?/g)]
+  .flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+for (const name of wanted) {
+  if (!(name in dcMod)) throw new Error(`dc.js 에 없는 것을 popup.js 가 가져오려 합니다: ${name}`);
+  sandbox[name] = dcMod[name];
+}
+const src = raw.replace(/import\s*\{[^}]+\}\s*from\s*"\.\/dc\.js";?/g, "");
 vm.runInContext(src, sandbox, { filename: "popup.js" });
 
 // popup.js 는 마지막에 load() 를 부른다. storage 가 비어 있어도 render() 까지
@@ -460,6 +471,58 @@ console.log("\n[6] 갤로그 변동 없는 사람이 목록에 오른다");
   els.get("btnBulkAdd").click();
   await new Promise((r) => setTimeout(r, 0));
   ok("빈 직접 입력은 막는다", stored.watchlist.length === n, `${stored.watchlist.length} vs ${n}`);
+}
+
+// ── 갤로그 기록 공유 ───────────────────────────────────────
+// 이미 명단에 있는 사람이라도 갤로그 기록은 받아와야 한다. 예전에는 코드가
+// 겹치면 통째로 건너뛰어서, 명단이 같은 완장끼리는 아무것도 못 넘겼다.
+console.log("\n[갤로그 기록 공유]");
+{
+  const DAY = 86400000, now = Date.now();
+  await seed({
+    watchlist: [
+      { kind: "code", value: "capture6180", reason: "벌레", memo: "", enabled: true,
+        gallogTotal: 100, gallogSince: now - 10 * DAY, gallogCountedAt: now - 1 * DAY },
+      { kind: "code", value: "chip3298", reason: "벌레", memo: "", enabled: true },
+    ],
+  });
+  alerts.length = 0;
+  confirmAnswer = true;
+  await sandbox.importItems([
+    { code: "capture6180", reason: "벌레",
+      gallogTotal: 100, gallogSince: now - 90 * DAY, gallogCountedAt: now - 30 * DAY },
+    { code: "chip3298", reason: "벌레",
+      gallogTotal: 42, gallogSince: now - 60 * DAY, gallogCountedAt: now - 60 * DAY },
+  ], null);
+
+  const wl = stored.watchlist;
+  ok("사람은 안 늘어남", wl.length === 2, String(wl.length))
+  ok("처음 본 시각이 넓어짐", wl[0].gallogSince === now - 90 * DAY, String(wl[0].gallogSince))
+  ok("마지막으로 잰 시각은 유지", wl[0].gallogCountedAt === now - 1 * DAY, String(wl[0].gallogCountedAt))
+  ok("기록 없던 사람은 받아옴", wl[1].gallogTotal === 42, String(wl[1].gallogTotal))
+  ok("몇 명분 받았는지 알려줌",
+     alerts.some((m) => /갤로그 기록/.test(m)), alerts.join(" | "));
+}
+
+// 내보낸 파일에 갤로그 기록이 들어가야 넘길 수 있다.
+console.log("\n[갤로그 기록 내보내기]");
+{
+  const now = Date.now();
+  await seed({
+    watchlist: [
+      { kind: "code", value: "leaf4517", reason: "실험2", memo: "", enabled: true,
+        gallogTotal: 7, gallogSince: now - 5000, gallogCountedAt: now - 100 },
+      { kind: "code", value: "read7286", reason: "벌레", memo: "", enabled: true },
+    ],
+  });
+  saved.length = 0;
+  confirmAnswer = true;
+  els.get("btnExportList").dispatchEvent(new sandbox.Event("click"));
+  const file = JSON.parse(saved[saved.length - 1]);
+  ok("두 명 다 나감", file.items.length === 2, String(file.items.length))
+  ok("갤로그 숫자가 들어감", file.items[0].gallogTotal === 7, String(file.items[0].gallogTotal))
+  ok("잰 적 없는 사람은 칸이 없다", file.items[1].gallogTotal === undefined,
+     JSON.stringify(file.items[1]));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -14,7 +14,7 @@ import {
   expiresAt, isManualRelease, labelForHours,
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
-  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, fetchRowsForCode,
+  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, mergeGallog, fetchRowsForCode,
 } from "./dc.js";
 import { readFileSync } from "node:fs";
 
@@ -1001,6 +1001,56 @@ console.log("\n[16] 판정 이어가기");
   ok("팝업 계산이 dc.js와 같다",
      m && Number(m[1]) === CHECK_DELAY_MS / 1000 && Number(m[2]) === FETCH_SECS,
      m ? `팝업 ${m[1]}+${m[2]} / dc ${CHECK_DELAY_MS / 1000}+${FETCH_SECS}` : "팝업에 없음");
+}
+
+// ── [22] 갤로그 기록 합치기 ────────────────────────────────
+// 완장이 여럿이면 같은 사람을 각자 조회하게 된다. 한 명이 한 바퀴 돌고 파일로
+// 넘기면 나머지는 조회 0번으로 기준점을 얻는다 (파딱 제안 2026-09-10).
+// 규칙을 잘못 짜서 최신으로 덮으면, 공유할수록 기준점이 뒤로 밀려서
+// 아무도 판정을 못 받게 된다. 그 반대인지를 여기서 본다.
+{
+  console.log("\n[22] 갤로그 기록 합치기");
+  const DAY = 86400000, now = Date.now();
+  const at = (d) => now - d * DAY;
+
+  // 나한테 기록이 없으면 남의 것을 그대로 받는다.
+  const got = mergeGallog(null, { gallogTotal: 100, gallogSince: at(90), gallogCountedAt: at(1) });
+  eq("없으면 그대로 받는다", got && got.gallogTotal, 100);
+  eq("받은 이유", got.why, "new");
+
+  // 숫자가 같으면 창이 넓어져야 한다 — 처음 본 시각은 이른 쪽.
+  const mine = { gallogTotal: 100, gallogSince: at(10), gallogCountedAt: at(1) };
+  const theirs = { gallogTotal: 100, gallogSince: at(90), gallogCountedAt: at(30) };
+  const w = mergeGallog(mine, theirs);
+  eq("처음 본 시각은 이른 쪽", w.gallogSince, at(90));
+  eq("마지막으로 잰 시각은 늦은 쪽", w.gallogCountedAt, at(1));
+  eq("넓힌 이유", w.why, "widen");
+
+  // 이게 핵심이다. 넓히기 전에는 3개월 판정이 안 나오고, 넓히면 나온다.
+  const qualifies = (x) => now - x.gallogSince >= 90 * DAY;
+  ok("합치기 전에는 판정 안 됨", !qualifies(mine));
+  ok("합치고 나면 판정 됨", qualifies(w));
+
+  // 숫자가 다르면 그 사이에 글을 쓴 것이다. 오래된 관측은 무효다.
+  const changed = mergeGallog(
+    { gallogTotal: 100, gallogSince: at(90), gallogCountedAt: at(30) },
+    { gallogTotal: 137, gallogSince: at(5), gallogCountedAt: at(1) }
+  );
+  eq("숫자가 다르면 늦은 쪽으로", changed.gallogTotal, 137);
+  eq("바꾼 이유", changed.why, "replace");
+
+  // 남의 것이 더 낡았고 숫자도 다르면 무시한다.
+  ok("낡고 어긋난 기록은 무시", mergeGallog(
+    { gallogTotal: 137, gallogSince: at(5), gallogCountedAt: at(1) },
+    { gallogTotal: 100, gallogSince: at(90), gallogCountedAt: at(30) }
+  ) === null);
+
+  // 더 나아지지 않으면 굳이 건드리지 않는다.
+  ok("나아질 게 없으면 그대로", mergeGallog(mine, mine) === null);
+
+  // 기록이 없는 항목(옛 형식 파일)은 아무것도 주지 않는다.
+  ok("갤로그 칸 없는 파일은 무시", mergeGallog(mine, { code: "x", reason: "벌레" }) === null);
+  ok("잰 적 없는 기록은 무시", mergeGallog(mine, { gallogTotal: 5, gallogCountedAt: 0 }) === null);
 }
 
 // ── [17] 설정 화면에 적힌 기본값 ──────────────────────────

@@ -463,6 +463,9 @@ const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", 
 // popup.js 는 dc.js 를 가져오지 않으므로 여기 적어둔다.
 // 두 값이 어긋나면 test.mjs 가 실패한다.
 const REASON_TXT_MAX = 20;
+
+// dc.js의 합치기 규칙을 그대로 쓴다. 여기 옮겨 적으면 규칙이 두 벌이 된다.
+import { mergeGallog } from "./dc.js";
 const CUSTOM_PICK = "__custom__";
 
 // 사유 칸 하나를 묶어서 다룬다. 드롭다운에서 '직접 입력'을 고르면 텍스트 칸이
@@ -643,9 +646,14 @@ $("btnExportCand").addEventListener("click", () => {
 
 $("btnExportList").addEventListener("click", () => {
   const withMemo = state.watchlist.filter((t) => (t.memo || "").trim()).length;
-  if (withMemo && !confirm(
+  const withGallog = state.watchlist.filter((t) => t.gallogCountedAt).length;
+  if ((withMemo || withGallog) && !confirm(
     `명단 ${state.watchlist.length}명을 파일로 내보냅니다.\n\n` +
-    `이 파일에는 메모가 그대로 들어갑니다 (${withMemo}명).\n` +
+    (withMemo ? `이 파일에는 메모가 그대로 들어갑니다 (${withMemo}명).\n` : "") +
+    (withGallog
+      ? `갤로그 기록도 같이 들어갑니다 (${withGallog}명).\n` +
+        `  받는 쪽은 그 사람들을 다시 조회하지 않아도 됩니다.\n`
+      : "") +
     `내 백업용이니 갤러리처럼 공개된 곳에는 올리지 마세요.\n\n` +
     `남에게 넘길 목적이라면 후보 탭의 '후보 내보내기'를 쓰세요.\n\n계속할까요?`
   )) return;
@@ -655,6 +663,15 @@ $("btnExportList").addEventListener("click", () => {
     reason: t.reason,
     memo: t.memo || "",
     enabled: t.enabled !== false,
+    // 갤로그 기록. 완장이 여럿이면 한 명이 돌고 넘기면 나머지는 조회 0번으로
+    // 기준점을 얻는다. 잰 적 없는 사람은 칸 자체를 안 넣어 파일을 키우지 않는다.
+    ...(t.gallogCountedAt ? {
+      gallogTotal: t.gallogTotal,
+      gallogSince: t.gallogSince,
+      gallogCountedAt: t.gallogCountedAt,
+      gallogCheckedAt: t.gallogCheckedAt,
+      gallogState: t.gallogState,
+    } : {}),
   })));
 });
 
@@ -713,9 +730,27 @@ async function importItems(items, exportedAt) {
   const tooLong = new Map();     // 20자 넘는 사유 → 몇 명
   let noReason = 0;                     // 사유 칸이 아예 없던 사람
 
+  // 이미 명단에 있는 사람은 새로 담지 않지만, 갤로그 기록은 받아올 수 있다.
+  // 완장이 여럿일 때 한 명이 돌고 넘기면 나머지가 조회를 건너뛰는 길이다.
+  const byCode = new Map(state.watchlist.map((t) => [t.value, t]));
+  const merged = [];
+
   for (const it of items) {
     const code = String(it.code || "").trim();
-    if (!code || seen.has(code) || known.has(code)) continue;
+    if (!code || seen.has(code)) continue;
+    if (known.has(code)) {
+      seen.add(code);
+      const mine = byCode.get(code);
+      const upd = mergeGallog(mine, it);
+      if (upd) {
+        const { why, ...fields } = upd;
+        for (const [k, v] of Object.entries(fields)) {
+          if (v === undefined) delete mine[k]; else mine[k] = v;
+        }
+        merged.push(why);
+      }
+      continue;
+    }
     seen.add(code);
 
     const given = String(it.reason || "").trim();
@@ -736,11 +771,24 @@ async function importItems(items, exportedAt) {
       reason: given || "음란성",
       memo: typeof it.memo === "string" ? it.memo : "",
       enabled: it.enabled !== false,
+      gallog: mergeGallog(null, it),
     });
   }
-  const dup = items.length - fresh.length;
+  const dup = items.length - fresh.length - merged.length;
+  const gotGallog = fresh.filter((f) => f.gallog).length + merged.length;
+
   if (!fresh.length) {
-    alert(`${items.length}명 전부 이미 명단에 있습니다.`);
+    if (merged.length) {
+      await chrome.storage.local.set({ watchlist: state.watchlist });
+      render();
+      alert(
+        `${items.length}명 전부 이미 명단에 있습니다.\n\n` +
+        `대신 ${merged.length}명의 갤로그 기록을 받아왔습니다.\n` +
+        `그 사람들은 다시 조회하지 않아도 됩니다.`
+      );
+    } else {
+      alert(`${items.length}명 전부 이미 명단에 있습니다.`);
+    }
     return;
   }
 
@@ -759,12 +807,14 @@ async function importItems(items, exportedAt) {
       ? `\n[주의] ${noReason}명은 파일에 사유가 없어 '음란성'으로 넣습니다.\n` +
         `  추가한 뒤 명단 탭에서 사유를 고쳐주세요.\n`
       : "") +
+    (gotGallog ? `\n갤로그 기록 ${gotGallog}명분을 같이 받아옵니다. 그만큼 조회를 덜 해도 됩니다.\n` : "") +
     (dup ? `\n(이미 있거나 중복인 ${dup}명은 건너뜁니다)\n` : "") +
     (exportedAt ? `\n파일 만든 시각: ${new Date(exportedAt).toLocaleString("ko-KR")}` : "")
   )) return;
 
-  state.watchlist.push(...fresh.map(({ code, reason, memo, enabled }) => ({
+  state.watchlist.push(...fresh.map(({ code, reason, memo, enabled, gallog }) => ({
     kind: "code", value: code, reason, memo, enabled,
+    ...(gallog ? (({ why, ...f }) => f)(gallog) : {}),
     nextCheckAt: 0, lastVerifiedAt: 0, lastSeen: 0, missingSince: 0,
   })));
   await chrome.storage.local.set({ watchlist: state.watchlist });
