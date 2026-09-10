@@ -6,7 +6,7 @@
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
   collectActivity, checkGallog, pickGallogTargets,
-  isBusy, localDateKey, jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK,
+  isBusy, localDateKey, jitter, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK,
   rowHealth, carryOver,
 } from "./dc.js";
 
@@ -151,9 +151,24 @@ async function runCheck({ auto = false } = {}) {
   if (targets.length > 60) {
     // 1.2를 리터럴로 적어두면 간격을 고칠 때 같이 안 고쳐진다. 실제로 이 줄은
     // 간격이 400ms인데 갤로그의 1.2초로 계산하고 있어서 3배 부풀려 있었다.
-    // 난수는 평균이 base라 간격이 그대로 예상 시간이 된다(조회 시간은 그 위에 붙는다).
-    const mins = Math.ceil((targets.length * (CHECK_DELAY_MS / 1000)) / 60);
+    //
+    // 간격만 세면 모자란다. 한 명당 조회 시간이 그 위에 붙는다. 300명에
+    // '6분쯤'이라 해놓고 8~9분이 걸려서 완장이 멈춘 줄 알았다 (2026-09-10).
+    // 실측은 한 명당 0.5초 안팎이었다(갤로그 300명 2분45초 = 0.55초/명).
+    const mins = Math.ceil((targets.length * (CHECK_DELAY_MS / 1000 + FETCH_SECS)) / 60);
     await log(`  (${mins}분쯤 걸립니다. 창을 닫아도 계속 진행됩니다)`);
+    // 명단이 크면 한 번에 다 보지 않는다. 며칠에 걸쳐 한 바퀴를 돈다.
+    // 이 설명이 없어서 완장은 고장 난 줄 안다 (파딱 피드백 2026-09-10).
+    if (due.length > cap) {
+      const times = Math.ceil(due.length / cap);
+      const days = Math.ceil(times / Math.max(1, (settings.checkTimes || []).length || 2));
+      await log(
+        `  명단이 커서 한 번에 다 보지 않습니다. ${cap}명씩 ${times}번, ` +
+        `하루 ${(settings.checkTimes || []).length || 2}번이면 ${days}일쯤 걸려 한 바퀴를 돕니다. ` +
+        `IP가 막히지 않게 일부러 나눠 돕니다.`
+      );
+    }
+    await log(`  도는 동안 '지금 확인'은 눌리지 않습니다. 겹쳐 도는 것을 막기 위해서입니다.`);
   }
 
   const candidates = [];
@@ -241,11 +256,21 @@ async function runCheck({ auto = false } = {}) {
     // 로그인이 풀렸거나 권한이 없으면 여기로 온다. 그런데 만료 예정 시각은
     // 이미 명단에 저장돼 있어서 디시에 묻지 않고도 셀 수 있다. 아무 말도 안
     // 하면 완장은 그냥 창을 닫고, 재차단할 사람이 있어도 모르고 지나간다.
-    const waiting = enabled.filter((t) => t.nextCheckAt && now >= t.nextCheckAt).length;
-    if (waiting) {
+    //
+    // 예전엔 `t.nextCheckAt && now >= t.nextCheckAt` 로 셌다. 그런데 명단
+    // 채우기로 담은 사람은 nextCheckAt이 0이라 전부 빠졌다. 위에서 대상을
+    // 고를 때는 0을 '봐야 할 사람'으로 치는데 세는 쪽만 달랐던 것이다.
+    // 파딱 갤 4575명이 전원 0이라 한 명도 안 세어졌다 (2026-09-10).
+    // 두 기준이 어긋나지 않게 위에서 이미 고른 due를 그대로 쓴다.
+    const overdue = due.filter((t) => t.nextCheckAt).length;
+    const never = due.length - overdue;
+    const parts = [];
+    if (overdue) parts.push(`${overdue}명은 만료 예정 시각이 지났고`);
+    if (never) parts.push(`${never}명은 아직 한 번도 확인하지 못했습니다`);
+    if (parts.length) {
       await log(
-        `  저장된 기록으로는 ${waiting}명이 이미 만료 예정 시각을 지났습니다. ` +
-        `디시에 로그인한 뒤 다시 확인해 주세요.`
+        `  저장된 기록으로는 ${due.length}명을 봐야 합니다 — ` +
+        `${parts.join(", ")}. 디시에 로그인한 뒤 다시 확인해 주세요.`
       );
     }
     await setStatus("오류 발생", false);

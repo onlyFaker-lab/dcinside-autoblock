@@ -925,12 +925,14 @@ $("btnGallog").addEventListener("click", () => {
     alert("갤로그를 확인할 대상이 없습니다.\n\n명단에 식별 코드를 먼저 넣어주세요.");
     return;
   }
-  // 1.2초 간격에 난수를 섞으므로 평균이 그대로 예상 시간이 된다.
-  const secs = Math.round((n * 1.2));
+  // 간격만 세면 늘 모자라게 나온다. 조회 시간이 그 위에 붙는다.
+  // dc.js의 CHECK_DELAY_MS / FETCH_SECS 와 같은 값. 어긋나면 검사가 실패한다.
+  const secs = Math.round(n * (1.2 + 0.5));
   const eta = secs < 60 ? `${secs}초` : `${Math.ceil(secs / 60)}분`;
   if (!confirm(
     `${n}명의 갤로그를 하나씩 확인합니다.\n` +
     `${eta}쯤 걸립니다. 창을 닫아도 계속 진행됩니다.\n\n` +
+    `한 번 누르면 ${n}명만 보고 끝납니다. 다시 누르면 다음 사람들입니다.\n` +
     `빠르게 많이 조회하면 디시가 IP를 막습니다. 일부러 천천히 돕니다.\n` +
     `한 번에 너무 많이 잡지 마세요.\n\n시작할까요?`
   )) return;

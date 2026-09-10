@@ -14,7 +14,7 @@ import {
   expiresAt, isManualRelease, labelForHours,
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
-  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, fetchRowsForCode,
+  reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, fetchRowsForCode,
 } from "./dc.js";
 import { readFileSync } from "node:fs";
 
@@ -966,6 +966,41 @@ console.log("\n[16] 판정 이어가기");
   ];
   const waiting = wl.filter((t) => t.nextCheckAt && now >= t.nextCheckAt).length;
   eq("만료 예정 시각이 지난 사람 수", waiting, 2);
+}
+
+// ── [21] 예상 시간과 봐야 할 사람 세기 ─────────────────────
+// 2026-09-10 파딱 실측에서 드러난 두 가지.
+{
+  console.log("\n[21] 예상 시간과 봐야 할 사람 세기");
+
+  // ① 로그인이 풀렸을 때 '봐야 할 사람'을 세는 기준이, 위에서 대상을 고르는
+  //    기준과 같아야 한다. 명단 채우기로 담은 사람은 nextCheckAt이 0인데
+  //    예전 코드는 0을 falsy로 걸러내서 4575명이 한 명도 안 세어졌다.
+  const now = Date.now();
+  const wl = [
+    { value: "a", nextCheckAt: now - 1000 },      // 만료 시각 지남
+    { value: "b", nextCheckAt: now + 86400000 },  // 아직
+    { value: "c", nextCheckAt: 0 },               // 담기만 하고 못 봄
+    { value: "d" },                               // 칸 자체가 없음
+  ];
+  const due = wl.filter((t) => !t.nextCheckAt || now >= t.nextCheckAt);
+  eq("봐야 할 사람 수", due.length, 3);
+  eq("그중 만료 시각이 지난 사람", due.filter((t) => t.nextCheckAt).length, 1);
+  eq("그중 한 번도 못 본 사람", due.filter((t) => !t.nextCheckAt).length, 2);
+
+  // ② 예상 시간은 간격만이 아니라 조회 시간까지 더해야 한다.
+  //    '6분쯤'이라 해놓고 8~9분이 걸리면 완장은 멈춘 줄 안다.
+  const perOne = CHECK_DELAY_MS / 1000 + FETCH_SECS;
+  ok("한 명당 시간이 간격보다 크다", perOne > CHECK_DELAY_MS / 1000, `${perOne}초`);
+  const mins = Math.ceil((300 * perOne) / 60);
+  ok("300명이면 6분보다 넉넉하다", mins > 6, `${mins}분`);
+
+  // 화면 문구와 팝업 계산이 같은 값을 봐야 한다.
+  const pjs = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
+  const m = pjs.match(/n \* \(([\d.]+) \+ ([\d.]+)\)/);
+  ok("팝업 계산이 dc.js와 같다",
+     m && Number(m[1]) === CHECK_DELAY_MS / 1000 && Number(m[2]) === FETCH_SECS,
+     m ? `팝업 ${m[1]}+${m[2]} / dc ${CHECK_DELAY_MS / 1000}+${FETCH_SECS}` : "팝업에 없음");
 }
 
 // ── [17] 설정 화면에 적힌 기본값 ──────────────────────────
