@@ -15,8 +15,17 @@ import {
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
   reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, mergeGallog, fetchRowsForCode,
+  BUSY_TIMEOUT_MS,
 } from "./dc.js";
+import { row, table } from "./fixtures.mjs";
 import { readFileSync } from "node:fs";
+
+// 조회 경로에는 요청 간격(1.2초)과 페이지 간격이 박혀 있다. 검사가 그걸 그대로
+// 자고 있어서 이 파일 한 번 도는 데 80초가 걸렸다. 순서(매크로태스크)는 그대로
+// 두고 시간만 0으로 만든다. test-bg.mjs 도 같은 방법을 쓴다.
+// ⚠ 간격 값 자체를 검사하는 곳은 jitter() 반환값을 보지 실제로 자지 않는다.
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, _ms, ...rest) => realSetTimeout(fn, 0, ...rest);
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = "") {
@@ -28,57 +37,8 @@ function eq(name, got, want) {
 }
 
 // ── 실제 마크업 ──────────────────────────────────────────────
-// 닉과 코드가 빈 <p></p> 껍데기에 싸여 있고, 셀 안에 jQuery 템플릿 <script>가
-// 들어 있으며, 처리 시각은 display:none 안에 숨어 있다. 상태 칸 클래스는
-// "blockstate txtbtn"이다. 전부 실제 화면 그대로다.
-function row({ num = 1, dataNum = 13799443, nik, code, state = "해제됨",
-               reason = "음란성", duration = "31일",
-               date = "2026.09.06", time = "15:06:30" } = {}) {
-  const stateCell = state === "차단 중"
-    ? `차단 중 <button type="button" class="btn_blue_round small" onclick="set_avoid(this, 'R', '${dataNum}', 0)">해제</button>`
-    : "해제됨";
-  return `
-			<tr>
-				<td class="gall_chk"><span class="checkbox">
-					<input type="checkbox" id="list_chk" name="chk_avoid_user[]">
-					<label for="list_chk" class="blind">글 선택</label></span></td>
-			  <td class="blocknum" data-num="${dataNum}">${num}</td>
-			  <td class="blocknik">
-				<p></p><p>${nik}</p><p></p>
-				<p></p><p>(${code})</p><p></p>
-				<script id="dup_grey-tmpl" type="text/x-jquery-tmpl">
-					<div class="pop_tipbox tip_bg_grey dup_grey_pop">
-						<div class="inner tip_blocknik">
-							<p class="block_txt">중복 차단으로 기존 차단은 해제되었습니다.</p>
-						</div>
-					</div>
-				</script>
-			  </td>
-			  <td class="blockcontent"><span><em>직접 차단</em></span></td>
-			  <td class="blockreason">${reason}</td>
-			  <td class="blocktime">${duration}</td>
-			  <td class="blockday">
-				<span class="block_date">${date}</span>
-				<div class="pop_tipbox tip_bg_grey" style="display:none">
-				  <div class="inner tip_blockday">
-					<p class="block_time">처리 시간 : ${time}</p>
-					<p class="block_conduct">처리자 : 매니저(manager1234)</p>
-				  </div>
-				</div>
-			  </td>
-			  <td class="blockstate txtbtn">
-
-								${stateCell}
-
-			  </td>
-			</tr>`;
-}
-
-const table = (rows) => `<table class="minor_block_list">
-		  <caption>차단 리스트</caption>
-		  <thead><tr><th scope="col">번호</th></tr></thead>
-		  <tbody>${rows.join("")}</tbody>
-		</table>`;
+// 픽스처는 fixtures.mjs 에 있다. test-bg.mjs 도 같은 것을 쓴다.
+// 양쪽에 따로 적어두면 한쪽만 고쳤을 때 어긋나는데 검사는 둘 다 통과한다.
 
 // ── 1. 실제 마크업 파싱 ──────────────────────────────────────
 // 2026-09-08 실제 갤로그 홈에서 복사한 마크업. 비로그인 + 비공개 상태다.
@@ -899,7 +859,8 @@ console.log("\n[16] 판정 이어가기");
     try { reasonFields("   "); return false; } catch { return true; }
   })());
 
-  // 화면과 코드가 같은 한도를 봐야 한다. popup.js 는 dc.js 를 가져오지 않는다.
+  // 화면과 코드가 같은 한도를 봐야 한다. popup.js 는 1.7.5부터 dc.js 를
+  // 가져오지만(mergeGallog) 이 한도는 아직 제 값을 따로 들고 있으므로 대조한다.
   const pjs = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
   const m = pjs.match(/REASON_TXT_MAX\s*=\s*(\d+)/);
   ok("popup.js 한도가 dc.js와 같다", m && Number(m[1]) === REASON_TXT_MAX,
@@ -996,11 +957,18 @@ console.log("\n[16] 판정 이어가기");
   ok("300명이면 6분보다 넉넉하다", mins > 6, `${mins}분`);
 
   // 화면 문구와 팝업 계산이 같은 값을 봐야 한다.
+  // match 는 첫 번째만 돌려준다. popup.js 에 이 식이 두 군데 있어서,
+  // 첫 줄만 보면 뒤엣것이 어긋나도 통과한다. 전부 본다.
   const pjs = readFileSync(new URL("./popup.js", import.meta.url), "utf8");
-  const m = pjs.match(/n \* \(([\d.]+) \+ ([\d.]+)\)/);
-  ok("팝업 계산이 dc.js와 같다",
-     m && Number(m[1]) === CHECK_DELAY_MS / 1000 && Number(m[2]) === FETCH_SECS,
-     m ? `팝업 ${m[1]}+${m[2]} / dc ${CHECK_DELAY_MS / 1000}+${FETCH_SECS}` : "팝업에 없음");
+  const all = [...pjs.matchAll(/n \* \(([\d.]+) \+ ([\d.]+)\)/g)];
+  ok("팝업에 예상 시간 계산이 있다", all.length > 0, `${all.length}군데`);
+  const bad = all.filter((m) =>
+    Number(m[1]) !== CHECK_DELAY_MS / 1000 || Number(m[2]) !== FETCH_SECS);
+  ok("팝업 계산이 전부 dc.js와 같다", all.length > 0 && bad.length === 0,
+     bad.length
+       ? `어긋난 곳 ${bad.length}/${all.length}: ${bad.map((m) => `${m[1]}+${m[2]}`).join(", ")}` +
+         ` / dc ${CHECK_DELAY_MS / 1000}+${FETCH_SECS}`
+       : "");
 }
 
 // ── [22] 갤로그 기록 합치기 ────────────────────────────────
@@ -1149,6 +1117,48 @@ console.log("\n[로그인 풀림 감지]");
     finally { delete globalThis.fetch; }
   })();
   eq("정상 목록은 그대로 읽는다", good, 1);
+}
+
+// ── [24] 명단 채우기가 만료 예정 시각을 같이 담는다 ─────────
+// 이게 없으면 담은 사람은 nextCheckAt 이 0 이 되고, 0 은 '한 번도 못 봤다'는
+// 뜻이라 만료가 한 달 남은 사람까지 매번 조회 대상이 된다. 파딱 갤 4577명이
+// 그 상태였다 — 하루 두 번 300명씩 8일을 도는데 볼 값어치가 있는 사람은 몇 명뿐.
+// 차단 목록에 처리 시각과 기간이 다 있으므로 디시에 더 묻지 않아도 된다.
+{
+  console.log("\n[24] 채우기가 만료 예정 시각을 담는다");
+  globalThis.fetch = async (url) => {
+    const p = Number(new URL(url, "https://x").searchParams.get("p") || 1);
+    if (p > 1) return { ok: true, text: async () => table([]) };
+    return { ok: true, text: async () => table([
+      row({ nik: "ㅇㅇ", code: "aaa1111", date: "2026.08.01", time: "10:00:00", state: "차단 중" }),
+    ]) };
+  };
+  const r = await collectByDuration("gid", "31일", 3);
+  const it = r.items[0];
+  ok("항목에 expireAt 이 있다", typeof it.expireAt === "number", JSON.stringify(it));
+
+  // 2026.08.01 10:00 + 744시간(31일) = 2026.09.01 10:00
+  const want = expiresAt({ date: "2026.08.01", time: "10:00:00", duration: "31일" }).getTime();
+  eq("expiresAt 과 같은 값", it.expireAt, want);
+  ok("31일 뒤가 맞다", it.expireAt - new Date("2026-08-01T10:00:00").getTime() === 744 * 3600 * 1000);
+}
+
+// ── [25] 굳은 잠금은 keepAlive 주기보다 넉넉히 길어야 한다 ──
+// 짧으면 멀쩡히 도는 작업 위로 두 번째 작업이 겹쳐 돈다. 요청이 두 배가 되는데
+// 이 프로젝트에서 요청이 두 배라는 건 IP 차단과 닿아 있다는 뜻이다.
+// 반대로 너무 길면 죽은 작업이 남긴 잠금 때문에 완장이 그만큼 기다린다
+// (2026-09-12 파딱: 38분 기다림).
+{
+  console.log("\n[25] 잠금 만료와 keepAlive 주기");
+  const bg = readFileSync(new URL("./background.js", import.meta.url), "utf8");
+  const m = bg.match(/KEEPALIVE_MS\s*=\s*([\d*\s]+);/);
+  ok("background.js 에 keepAlive 주기가 있다", !!m);
+  const keep = m ? eval(m[1]) : 0;
+  ok("keepAlive 가 30초 문턱보다 짧다", keep > 0 && keep < 30000, `${keep}ms`);
+  ok("잠금 만료가 keepAlive 보다 훨씬 길다", BUSY_TIMEOUT_MS >= keep * 5,
+     `잠금 ${BUSY_TIMEOUT_MS}ms / keepAlive ${keep}ms`);
+  ok("잠금 만료가 10분을 넘지 않는다", BUSY_TIMEOUT_MS <= 10 * 60 * 1000,
+     `${BUSY_TIMEOUT_MS / 60000}분`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

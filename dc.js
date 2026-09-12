@@ -263,7 +263,18 @@ export function listPagesFor(count) {
 
 // 서비스워커는 작업 도중에도 종료된다. busy 가 true 인 채 남으면
 // 이후 알람이 전부 되돌아가 확장이 조용히 멈춘다. 오래된 잠금은 무시한다.
-export const BUSY_TIMEOUT_MS = 30 * 60 * 1000;
+// 굳은 잠금을 몇 분 만에 풀어줄지.
+//
+// 예전엔 30분이었다. "300명 조회가 9분대니 30분이면 여유가 있다"는 계산이었는데,
+// 그 계산은 **작업이 끝까지 돈다**는 전제였다. 실제로는 서비스워커가 90초 만에
+// 죽어서, 완장은 죽은 작업이 남긴 잠금 때문에 30분을 기다렸다.
+// 2026-09-12 파딱 기록: 10:47 마지막 조회 → 11:25 잠금 해제. 38분.
+//
+// v1.7.8부터 keepAlive가 20초마다 busySince를 갱신한다. 살아 있는 작업은 절대
+// 3분 넘게 조용하지 않으므로, 3분이 지난 잠금은 죽은 것으로 봐도 된다.
+// **이 값을 줄이려면 keepAlive 간격을 먼저 보세요.** 갱신 주기보다 짧으면
+// 멀쩡히 도는 작업 위로 두 번째 작업이 겹쳐 돈다.
+export const BUSY_TIMEOUT_MS = 3 * 60 * 1000;
 export function isBusy(status, now = Date.now()) {
   if (!status || !status.busy) return false;
   return now - (status.busySince || 0) < BUSY_TIMEOUT_MS;
@@ -629,6 +640,20 @@ export async function collectByDuration(
         date: r.date,
         time: r.time,
         released: r.released,
+        // 만료 예정 시각을 여기서 계산해 같이 담는다 (v1.7.8).
+        // 차단 목록에 처리 시각과 기간이 다 있으므로 디시에 더 묻지 않아도 된다.
+        //
+        // 이게 없으면 명단 채우기로 담은 사람은 nextCheckAt이 0이 되고, 0은
+        // '아직 한 번도 못 봤다'는 뜻이라 **만료가 한참 남은 사람까지 매번
+        // 조회 대상**이 된다. 4577명이면 하루 두 번 × 300명씩 8일을 도는데,
+        // 그중 실제로 만료된 사람은 몇 명뿐이다. 3-3절의 설계(만료 예정
+        // 시각까지 조회하지 않는다)가 명단 채우기 경로에만 빠져 있었다.
+        //
+        // 로그아웃 상태에서 후보를 미리 알려줄 수 있는 근거이기도 하다.
+        expireAt: (() => {
+          const e = expiresAt({ date: r.date, time: r.time, duration: r.duration });
+          return e ? e.getTime() : null;
+        })(),
       });
     }
     if (onProgress) await onProgress(page, map.size, oldest);

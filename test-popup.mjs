@@ -552,5 +552,38 @@ console.log("\n[실행 전 재확인 토글]");
   ok("이미 차단된 사람은 뺀다고 알림", /빼고 보냅니다/.test(onMsg), onMsg);
 }
 
+// ── 채우기에서 담을 때 만료 예정 시각이 따라간다 ────────────
+// 안 따라가면 nextCheckAt 이 0 이 되고, 0 은 '한 번도 못 봤다'는 뜻이라
+// 만료가 한 달 남은 사람까지 매번 조회 대상이 된다. 파딱 갤 4577명이 그랬다.
+console.log("\n[채우기 → 명단, 만료 예정 시각]");
+{
+  const AUG1 = new Date("2026-08-01T10:00:00").getTime();
+  const EXP = AUG1 + 744 * 3600 * 1000;          // 31일 뒤
+  await seed({
+    imports: [
+      { code: "aaa1111", reason: "음란성", date: "2026.08.01", expireAt: EXP },
+      { code: "bbb2222", reason: "벌레", date: "2026.08.01", expireAt: null },
+      { code: "ccc3333", reason: "음란성", date: "2026.08.01", expireAt: EXP },
+    ],
+    // 이미 명단에 있고 만료 시각을 모르는 사람. 옛 버전으로 담은 명단이 이 모양이다.
+    watchlist: [{ kind: "code", value: "ccc3333", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+  });
+
+  confirmAnswer = true;
+  alerts.length = 0;
+  els.get("btnScanAdd").click();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const byCode = new Map(stored.watchlist.map((t) => [t.value, t]));
+  ok("만료 시각을 아는 사람은 그때까지 안 본다", byCode.get("aaa1111").nextCheckAt === EXP + 60000,
+     String(byCode.get("aaa1111").nextCheckAt));
+  ok("모르는 사람은 0 (바로 조회 대상)", byCode.get("bbb2222").nextCheckAt === 0,
+     String(byCode.get("bbb2222").nextCheckAt));
+  ok("이미 있던 사람은 중복으로 안 담긴다", stored.watchlist.filter((t) => t.value === "ccc3333").length === 1);
+  ok("이미 있던 사람의 빈 만료 시각을 채운다", byCode.get("ccc3333").nextCheckAt === EXP + 60000,
+     String(byCode.get("ccc3333").nextCheckAt));
+  ok("몇 명을 채웠는지 알린다", /만료 예정 시각을 채웠습니다/.test(alerts.join("\n")), alerts.join(" | "));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

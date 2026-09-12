@@ -36,6 +36,39 @@ async function touchBusy() {
   }
 }
 
+// ⚠ MV3 서비스워커는 **30초 동안 chrome API 호출이 없으면 종료된다.**
+// `fetch` 와 `setTimeout` 은 그 타이머를 되살리지 못한다. 이것이 v1.7.7까지
+// 조회가 늘 중간에 끊기던 원인이다.
+//
+// 2026-09-12 파딱 기록:
+//   [10:46:30] 명단 4577명 중 300명을 조회합니다
+//   [10:47:23]   [25/300] resign7521: 2건 조회 — 이상 없음
+//   [10:47:56]   [50/300] concerto8599: 2건 조회 — 이상 없음
+//   [11:25:53] [안내] 끝나지 않은 채 남아 있던 작업 표시를 풀었습니다.
+//
+// 25명마다 33초다. 그 사이 chrome API 를 한 번도 안 불러서 30초 문턱을 넘겼다.
+// 50명에서 죽었고, 결과는 마지막에 한꺼번에 저장하는 구조라 **50명분이 통째로
+// 사라졌다.** 다음 차례에 같은 300명을 다시 골라 또 50명에서 죽는다.
+// 하루 두 번, 며칠을 돌아도 영원히 한 명도 진행되지 않는다.
+//
+// 그래서 20초마다 chrome API 를 부른다. 타이머 자체는 워커를 살리지 못하지만,
+// 워커가 살아 있는 동안 콜백이 돌면 그때 부른 API 가 문턱을 되돌린다.
+// 20초는 30초 문턱보다 넉넉히 짧다.
+//
+// touchBusy 를 쓰는 이유는 한 번에 두 가지를 하기 때문이다. chrome API 호출이라
+// 워커가 살고, busySince 가 갱신되어 잠금이 도중에 만료되지 않는다.
+const KEEPALIVE_MS = 20 * 1000;
+let keepAliveTimer = null;
+
+function startKeepAlive() {
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(() => { touchBusy().catch(() => {}); }, KEEPALIVE_MS);
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; }
+}
+
 async function getState() {
   const s = await chrome.storage.local.get(null);
   return {
@@ -53,6 +86,9 @@ async function getState() {
 }
 
 async function setStatus(text, busy) {
+  // 긴 작업은 전부 여기를 지난다. 한 곳에 붙여두면 경로마다 따로 챙길 필요가 없다.
+  // 경로마다 붙이면 새 경로를 만들 때 빠뜨리고, 빠뜨려도 조용히 죽기만 한다.
+  if (busy) startKeepAlive(); else stopKeepAlive();
   await chrome.storage.local.set({
     status: { text, busy, busySince: busy ? Date.now() : 0 },
   });
@@ -150,7 +186,12 @@ async function runCheck({ auto = false } = {}) {
     (sweep.length ? ` (만료 ${due.length}명 + 점검 ${sweep.length}명)` : "") +
     (due.length > cap ? ` — ${due.length}명 중 ${cap}명, 나머지는 다음 차례에` : "")
   );
-  if (targets.length > 60) {
+  // ⚠ 계획 안내는 **첫 조회가 성공한 뒤에** 한다.
+  // 로그아웃 상태에서 미리 말하면 `9분쯤 걸립니다` `8일쯤 걸려 한 바퀴를 돕니다`
+  // 를 다 읽은 다음 줄에 `[오류] 로그인이 풀린 것 같습니다` 가 온다. 완장은
+  // 9분짜리 작업이 시작된 줄 알고 기다린다 (파딱 피드백 2026-09-12).
+  async function announcePlan() {
+    if (targets.length <= 60) return;
     // 1.2를 리터럴로 적어두면 간격을 고칠 때 같이 안 고쳐진다. 실제로 이 줄은
     // 간격이 400ms인데 갤로그의 1.2초로 계산하고 있어서 3배 부풀려 있었다.
     //
@@ -172,6 +213,7 @@ async function runCheck({ auto = false } = {}) {
     }
     await log(`  도는 동안 '지금 확인'은 눌리지 않습니다. 겹쳐 도는 것을 막기 위해서입니다.`);
   }
+  let announced = false;
 
   const candidates = [];
   const manual = [];
@@ -185,6 +227,7 @@ async function runCheck({ auto = false } = {}) {
     for (let i = 0; i < targets.length; i++) {
       const entry = targets[i];
       const rows = await fetchRowsForCode(settings.galleryId, entry.value);
+      if (!announced) { announced = true; await announcePlan(); }
       const result = analyzeCode(rows, entry.value, entry);
 
       // 행 수 대조만으로는 부족하다. 표는 멀쩡히 읽었는데 칸 하나가 안 읽히면
@@ -238,7 +281,20 @@ async function runCheck({ auto = false } = {}) {
       if (result.status === "manual") manual.push(result);
 
       // 조회 진행 상황은 많을 때만 띄엄띄엄 남긴다
-      if ((i + 1) % 25 === 0) await touchBusy();
+      if ((i + 1) % 25 === 0) {
+        await touchBusy();
+        // ⚠ 여기서 중간 저장을 해야 한다. 끝에 한꺼번에 저장하면, 워커가 도중에
+        // 죽었을 때 그때까지 조회한 사람이 통째로 사라진다. 그 사람들은
+        // nextCheckAt 이 그대로라 다음 차례에 똑같이 뽑히고, 똑같은 자리에서
+        // 또 죽는다. 하루 두 번 며칠을 돌아도 한 명도 진행되지 않는다.
+        // 2026-09-12 파딱 기록에서 실제로 그랬다 (10:46 / 14:00 / 18:06 동일 반복).
+        //
+        // 후보는 중간 저장하지 않아도 된다. candidate 판정은 nextCheckAt 이
+        // '지금'이라 다음 차례에 어차피 다시 뽑힌다. 반면 '이상 없음'으로 끝난
+        // 사람은 만료 시각까지 안 봐도 되므로, 그 판정을 잃으면 안 된다.
+        await saveWatchlistUpdates(updates);
+        updates.clear();
+      }
 
       if (targets.length <= 20 || (i + 1) % 25 === 0 || i + 1 === targets.length) {
         const verdict = {
@@ -377,6 +433,17 @@ async function runApply() {
   const { settings, candidates, history, candidatesAt } = await getState();
   if (!candidates.length) return { ok: true };
 
+  // 한도 검사가 재확인보다 먼저다. 순서가 반대면, 한도를 넘는 후보에 대해
+  // 재확인 조회를 전부 내보낸 뒤에 "한도 초과로 중단"이 뜬다. 한 명도 못 막으면서
+  // 사람당 한 요청씩 나가는 것이라 5-5절 IP 차단 사고와 모양이 같다.
+  if (candidates.length > settings.maxPerRun) {
+    await log(
+      `[중단] 후보 ${candidates.length}건이 한도(${settings.maxPerRun}건)를 넘습니다.`
+    );
+    await setStatus("한도 초과로 중단", false);
+    return { ok: false };
+  }
+
   // 후보 목록은 판정한 그 순간의 사진이다. 그 뒤에 다른 완장이 손으로
   // 갱신차단을 걸면 우리는 모른다. 그 상태로 보내면 이미 차단된 사람에게
   // 또 걸게 되고, 중복 차단은 기존 차단을 풀고 새로 걸어 만료일만 밀린다.
@@ -387,6 +454,11 @@ async function runApply() {
   // 이 프로젝트는 요청 하나하나가 IP 차단과 닿아 있으므로 기본은 꺼둔다.
   // 파딱 제안 2026-09-10: "토글형으로 넣어두는 것은 괜찮아 보인다".
   if (settings.recheckBeforeApply) {
+    // 재확인도 사람당 한 요청씩 나가는 긴 작업이다. 잠그지 않으면 도는 동안
+    // 알람이 정기 확인을 띄워 두 경로가 겹쳐 돈다. 요청이 두 배로 나가는 것이라
+    // 여기를 안 잠그면 IP 차단을 피하려고 넣은 1.2초 간격이 무의미해진다.
+    await setStatus("후보 재확인 중...", true);
+
     const staleMins = candidatesAt ? Math.round((Date.now() - candidatesAt) / 60000) : 0;
     await log(
       `보내기 전에 후보 ${candidates.length}명이 아직 풀려 있는지 다시 봅니다` +
@@ -394,8 +466,9 @@ async function runApply() {
     );
 
     const stillOpen = [];
-    const already = [];
-    for (const c of candidates) {
+    const already = [];      // 그 사이에 다른 완장이 차단함
+    const changed = [];      // 목록에서 사라졌거나 손으로 풀린 것으로 바뀜
+    for (const [i, c] of candidates.entries()) {
       let rows;
       try {
         rows = await fetchRowsForCode(settings.galleryId, c.code);
@@ -407,10 +480,29 @@ async function runApply() {
         await setStatus("재확인 실패 — 실행 안 함", false);
         return { ok: false, error: e.message };
       }
-      const verdict = analyzeCode(rows, c.code);
+
+      // 표를 제대로 못 읽었으면 판정도 못 믿는다. 특히 상태 칸을 못 읽으면
+      // released가 전부 false가 되어 아직 풀려 있는 사람이 '이미 차단됨'으로
+      // 보이고, 그대로 빼면 조용히 재차단을 건너뛰게 된다.
+      if (rowHealth(rows).broken) {
+        await log(`[중단] ${c.code}의 차단 목록을 제대로 읽지 못했습니다.`);
+        await log(`  판정을 믿을 수 없어 한 명도 보내지 않았습니다. 후보는 그대로 남아 있습니다.`);
+        await setStatus("재확인 실패 — 실행 안 함", false);
+        return { ok: false, error: "재확인 중 표를 읽지 못했습니다" };
+      }
+
+      // entry를 넘겨야 한다. analyzeCode의 candidate 갈래가 entry.reason을 읽으므로
+      // 빼먹으면 "아직 풀려 있다"는 정상 경로에서 그대로 터진다. 후보 객체가
+      // reason·memo를 들고 있으므로 그대로 넘기면 사유 승계도 유지된다.
+      const verdict = analyzeCode(rows, c.code, c);
       if (verdict.status === "candidate") stillOpen.push(c);
-      else already.push(c.code);
+      else if (verdict.status === "active") already.push(c.code);
+      else changed.push(`${c.code}(${verdict.status === "manual" ? "손으로 풀림" : "목록에 없음"})`);
+
       await new Promise((r) => setTimeout(r, jitter(CHECK_DELAY_MS)));
+      // MV3 서비스워커는 작업 도중에도 종료된다. 잠금 시각을 갱신해 두지 않으면
+      // 긴 재확인 도중에 잠금이 굳은 것으로 오인된다.
+      if ((i + 1) % 25 === 0) await touchBusy();
     }
 
     if (already.length) {
@@ -418,26 +510,27 @@ async function runApply() {
         `  ${candidates.length}명 중 ${already.length}명은 그 사이에 이미 차단됐습니다. ` +
         `빼고 보냅니다. 그만큼 하루 차단 한도를 아꼈습니다.`
       );
-    } else {
+    }
+    // 이쪽은 '아껴서 좋은 일'이 아니다. 판정이 바뀐 것이므로 따로 말한다.
+    // 뭉뚱그려 "이미 차단됐습니다"로 적으면 왜 안 막혔는지 알 수 없게 된다.
+    if (changed.length) {
+      await log(
+        `  [안내] ${changed.length}명은 후보를 뽑은 뒤로 판정이 바뀌어 빼고 보냅니다: ` +
+        `${changed.join(", ")}`
+      );
+    }
+    if (!already.length && !changed.length) {
       await log(`  ${candidates.length}명 모두 아직 풀려 있습니다.`);
     }
 
     if (!stillOpen.length) {
-      await log("보낼 사람이 없습니다. 후보 전원이 이미 차단돼 있습니다.");
+      await log("보낼 사람이 없습니다. 후보 전원이 이미 차단됐거나 판정이 바뀌었습니다.");
       await chrome.storage.local.set({ candidates: [] });
       await setStatus("이상 없음", false);
-      return { ok: true, skipped: already.length };
+      return { ok: true, skipped: already.length + changed.length };
     }
     candidates.length = 0;
     candidates.push(...stillOpen);
-  }
-
-  if (candidates.length > settings.maxPerRun) {
-    await log(
-      `[중단] 후보 ${candidates.length}건이 한도(${settings.maxPerRun}건)를 넘습니다.`
-    );
-    await setStatus("한도 초과로 중단", false);
-    return { ok: false };
   }
 
   await setStatus("재차단 실행 중...", true);

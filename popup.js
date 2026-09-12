@@ -1101,15 +1101,37 @@ $("btnScanAdd").addEventListener("click", async () => {
   if (!confirm(`${picked.length}명을 명단에 추가합니다.\n\n${detail}\n\n앞으로 이 사람들의 차단이 풀리면 재차단 후보로 올라옵니다.`)) return;
 
   const known = new Set(state.watchlist.map((t) => t.value));
+  const byCode = new Map(state.watchlist.map((t) => [t.value, t]));
   let added = 0;
+  let scheduled = 0;
+  let backfilled = 0;
   for (const it of state.imports) {
-    if (!pickedSet.has(it.code) || known.has(it.code)) continue;
+    if (!pickedSet.has(it.code)) continue;
+    // 만료 예정 시각을 알면 그때까지 조회하지 않는다 (v1.7.8).
+    // 예전에는 여기를 비워둬서 nextCheckAt이 0이 됐고, 0은 '한 번도 못 봤다'는
+    // 뜻이라 만료가 한 달 남은 사람도 매번 조회 대상이 됐다. 4577명을 8일에 걸쳐
+    // 도는데 그중 실제로 볼 값어치가 있는 사람은 몇 명뿐이었다.
+    // 이미 지난 시각이면 그대로 둔다 — 다음 확인 때 바로 뽑히는 게 맞다.
+    const next = it.expireAt ? it.expireAt + 60 * 1000 : 0;
+
+    if (known.has(it.code)) {
+      // 이미 명단에 있는 사람은 새로 담지 않는다. 다만 만료 시각을 모르고 있었다면
+      // 지금 채워 준다. 옛 버전으로 담은 명단을 고치는 유일한 길이다.
+      // 담을 때 값을 안 넣던 시절의 명단은 전원이 0이고, 그 상태로는 정기 확인이
+      // 매번 앞에서부터 300명을 훑기만 한다.
+      const mine = byCode.get(it.code);
+      if (mine && !mine.nextCheckAt && next) { mine.nextCheckAt = next; backfilled++; }
+      continue;
+    }
+
+    if (next) scheduled++;
     state.watchlist.push({
       kind: "code",
       value: it.code,
       reason: it.reason || "음란성",
       memo: `${it.date} 31일 차단에서 추가`,
       enabled: true,
+      nextCheckAt: next,
     });
     known.add(it.code);
     added++;
@@ -1123,12 +1145,21 @@ $("btnScanAdd").addEventListener("click", async () => {
   // 담을 때 그 사람들만 미리 해두면 채우기를 하는 날마다 저절로 나뉜다.
   // 총 요청 수는 같지만 한 번에 몰리지 않는다.
   if ($("scanWithGallog").checked && added) {
-    alert(`${added}명을 명단에 추가했습니다.\n이어서 이 사람들의 갤로그 숫자를 기록합니다.`);
+    alert(
+      `${added}명을 명단에 추가했습니다.` +
+      (scheduled ? `\n그중 ${scheduled}명은 만료 예정 시각까지 조회하지 않습니다.` : "") +
+      (backfilled ? `\n이미 명단에 있던 ${backfilled}명의 만료 예정 시각을 채웠습니다.` : "") +
+      `\n\n이어서 이 사람들의 갤로그 숫자를 기록합니다.`
+    );
     chrome.runtime.sendMessage({
       type: "gallog", limit: added, months: 0, codes: picked,
     });
   } else {
-    alert(`${added}명을 명단에 추가했습니다.`);
+    alert(
+      `${added}명을 명단에 추가했습니다.` +
+      (scheduled ? `\n그중 ${scheduled}명은 만료 예정 시각까지 조회하지 않습니다.` : "") +
+      (backfilled ? `\n\n이미 명단에 있던 ${backfilled}명의 만료 예정 시각을 채웠습니다.\n그 사람들도 이제 만료될 때만 조회합니다.` : "")
+    );
   }
 });
 
