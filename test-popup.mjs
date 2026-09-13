@@ -555,6 +555,11 @@ console.log("\n[실행 전 재확인 토글]");
 // ── 채우기에서 담을 때 만료 예정 시각이 따라간다 ────────────
 // 안 따라가면 nextCheckAt 이 0 이 되고, 0 은 '한 번도 못 봤다'는 뜻이라
 // 만료가 한 달 남은 사람까지 매번 조회 대상이 된다. 파딱 갤 4577명이 그랬다.
+//
+// ⚠ 여기서 '이미 명단에 있는 사람'을 imports 에 넣어 검사하면 안 된다.
+// background 의 runScan 이 imports 에 담기 전에 걸러내므로 그런 상태는
+// 앱이 만들 수 없다. v1.7.8이 그 상태를 지어내 검사해놓고, 절대 돌지 않는
+// 되메우기 코드를 통과시켰다 (2026-09-13). 되메우기 검사는 test-bg.mjs 에 있다.
 console.log("\n[채우기 → 명단, 만료 예정 시각]");
 {
   const AUG1 = new Date("2026-08-01T10:00:00").getTime();
@@ -563,10 +568,8 @@ console.log("\n[채우기 → 명단, 만료 예정 시각]");
     imports: [
       { code: "aaa1111", reason: "음란성", date: "2026.08.01", expireAt: EXP },
       { code: "bbb2222", reason: "벌레", date: "2026.08.01", expireAt: null },
-      { code: "ccc3333", reason: "음란성", date: "2026.08.01", expireAt: EXP },
     ],
-    // 이미 명단에 있고 만료 시각을 모르는 사람. 옛 버전으로 담은 명단이 이 모양이다.
-    watchlist: [{ kind: "code", value: "ccc3333", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+    watchlist: [],
   });
 
   confirmAnswer = true;
@@ -579,10 +582,8 @@ console.log("\n[채우기 → 명단, 만료 예정 시각]");
      String(byCode.get("aaa1111").nextCheckAt));
   ok("모르는 사람은 0 (바로 조회 대상)", byCode.get("bbb2222").nextCheckAt === 0,
      String(byCode.get("bbb2222").nextCheckAt));
-  ok("이미 있던 사람은 중복으로 안 담긴다", stored.watchlist.filter((t) => t.value === "ccc3333").length === 1);
-  ok("이미 있던 사람의 빈 만료 시각을 채운다", byCode.get("ccc3333").nextCheckAt === EXP + 60000,
-     String(byCode.get("ccc3333").nextCheckAt));
-  ok("몇 명을 채웠는지 알린다", /만료 예정 시각을 채웠습니다/.test(alerts.join("\n")), alerts.join(" | "));
+  ok("몇 명이 예약됐는지 알린다", /만료 예정 시각까지 조회하지 않습니다/.test(alerts.join("\n")),
+     alerts.join(" | "));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

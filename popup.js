@@ -756,8 +756,8 @@ async function importItems(items, exportedAt) {
 
   // 이미 명단에 있는 사람은 새로 담지 않지만, 갤로그 기록은 받아올 수 있다.
   // 완장이 여럿일 때 한 명이 돌고 넘기면 나머지가 조회를 건너뛰는 길이다.
-  const byCode = new Map(state.watchlist.map((t) => [t.value, t]));
   const merged = [];
+  const byCode = new Map(state.watchlist.map((t) => [t.value, t]));
 
   for (const it of items) {
     const code = String(it.code || "").trim();
@@ -1101,10 +1101,8 @@ $("btnScanAdd").addEventListener("click", async () => {
   if (!confirm(`${picked.length}명을 명단에 추가합니다.\n\n${detail}\n\n앞으로 이 사람들의 차단이 풀리면 재차단 후보로 올라옵니다.`)) return;
 
   const known = new Set(state.watchlist.map((t) => t.value));
-  const byCode = new Map(state.watchlist.map((t) => [t.value, t]));
   let added = 0;
   let scheduled = 0;
-  let backfilled = 0;
   for (const it of state.imports) {
     if (!pickedSet.has(it.code)) continue;
     // 만료 예정 시각을 알면 그때까지 조회하지 않는다 (v1.7.8).
@@ -1114,15 +1112,11 @@ $("btnScanAdd").addEventListener("click", async () => {
     // 이미 지난 시각이면 그대로 둔다 — 다음 확인 때 바로 뽑히는 게 맞다.
     const next = it.expireAt ? it.expireAt + 60 * 1000 : 0;
 
-    if (known.has(it.code)) {
-      // 이미 명단에 있는 사람은 새로 담지 않는다. 다만 만료 시각을 모르고 있었다면
-      // 지금 채워 준다. 옛 버전으로 담은 명단을 고치는 유일한 길이다.
-      // 담을 때 값을 안 넣던 시절의 명단은 전원이 0이고, 그 상태로는 정기 확인이
-      // 매번 앞에서부터 300명을 훑기만 한다.
-      const mine = byCode.get(it.code);
-      if (mine && !mine.nextCheckAt && next) { mine.nextCheckAt = next; backfilled++; }
-      continue;
-    }
+    // 이미 명단에 있는 사람은 여기 올 수 없다. background 의 runScan 이
+    // imports 에 담기 전에 걸러낸다. 만료 시각 되메우기를 여기에 두면
+    // **절대 돌지 않는 죽은 코드**가 된다 (v1.7.8에서 실제로 그랬다).
+    // 되메우기는 runScan 안에 있다.
+    if (known.has(it.code)) continue;
 
     if (next) scheduled++;
     state.watchlist.push({
@@ -1148,7 +1142,6 @@ $("btnScanAdd").addEventListener("click", async () => {
     alert(
       `${added}명을 명단에 추가했습니다.` +
       (scheduled ? `\n그중 ${scheduled}명은 만료 예정 시각까지 조회하지 않습니다.` : "") +
-      (backfilled ? `\n이미 명단에 있던 ${backfilled}명의 만료 예정 시각을 채웠습니다.` : "") +
       `\n\n이어서 이 사람들의 갤로그 숫자를 기록합니다.`
     );
     chrome.runtime.sendMessage({
@@ -1157,8 +1150,7 @@ $("btnScanAdd").addEventListener("click", async () => {
   } else {
     alert(
       `${added}명을 명단에 추가했습니다.` +
-      (scheduled ? `\n그중 ${scheduled}명은 만료 예정 시각까지 조회하지 않습니다.` : "") +
-      (backfilled ? `\n\n이미 명단에 있던 ${backfilled}명의 만료 예정 시각을 채웠습니다.\n그 사람들도 이제 만료될 때만 조회합니다.` : "")
+      (scheduled ? `\n그중 ${scheduled}명은 만료 예정 시각까지 조회하지 않습니다.` : "")
     );
   }
 });

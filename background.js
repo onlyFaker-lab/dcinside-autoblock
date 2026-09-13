@@ -716,6 +716,31 @@ async function runScan(pages = 10, untilDate = "", includeReleased = false) {
     const known = new Set(watchlist.map((t) => t.value));
     const fresh = items.filter((i) => !known.has(i.code));
 
+    // ⚠ 되메우기는 **여기서** 해야 한다. 팝업의 '담기'에서는 절대 안 된다.
+    //
+    // 바로 위 줄에서 이미 명단에 있는 사람을 imports 에서 빼버린다. 그게 이
+    // 화면의 뜻이고("이미 명단에 있는 사람은 빼고 보여줍니다") 4577명을 매번
+    // 다시 보여주지 않으려는 것이다. 그래서 팝업이 보는 imports 에는 기존
+    // 명단 사람이 **들어 있을 수가 없다.**
+    //
+    // v1.7.8에서 이걸 놓치고 팝업 '담기' 쪽에 되메우기를 넣었다가, 앱이 만들
+    // 수 없는 상태를 검사만 통과하는 죽은 코드를 냈다. 완장에게 "채우기 한 번
+    // 더 → 담기"라고 안내까지 했는데 눌러도 0명이 나왔을 것이다 (2026-09-13).
+    //
+    // 되메우는 대상은 '차단 중인데 명단의 만료 예정 시각이 비어 있는 사람'이다.
+    // 비어 있으면 '한 번도 못 봤다'는 뜻이라 매 확인마다 조회 대상이 된다.
+    // 이미 해제된 사람은 비어 있는 게 맞다 — 지금 바로 봐야 할 사람이니까.
+    const byCode = new Map(watchlist.map((t) => [t.value, t]));
+    let backfilled = 0;
+    for (const it of items) {
+      const mine = byCode.get(it.code);
+      if (mine && !mine.nextCheckAt && it.expireAt) {
+        mine.nextCheckAt = it.expireAt + 60 * 1000;
+        backfilled++;
+      }
+    }
+    if (backfilled) await chrome.storage.local.set({ watchlist });
+
     await chrome.storage.local.set({ imports: fresh, importsAt: Date.now() });
     // 걸러낸 사람 수를 말해준다. 말없이 줄어들면 그것도 조용한 실패다.
     if (releasedSkipped) {
@@ -733,6 +758,14 @@ async function runScan(pages = 10, untilDate = "", includeReleased = false) {
           (untilDate ? `, 아직 ${untilDate}까지 못 갔습니다` : "") + ")"
         : "")
     );
+
+    // 말없이 고치면 그것도 조용한 실패다. 몇 명을 채웠는지 밝힌다.
+    if (backfilled) {
+      await log(
+        `  이미 명단에 있던 ${backfilled}명의 만료 예정 시각을 채웠습니다. ` +
+        `이제 그 사람들은 만료될 때만 조회합니다.`
+      );
+    }
     // 다음에 '할 일' 탭에서 한 번에 불러올 때 어디부터 보면 되는지 쓴다.
     // 완장이 매번 날짜를 고르지 않아도 되게 하려는 것이다.
     await chrome.storage.local.set({ lastScanAt: Date.now() });

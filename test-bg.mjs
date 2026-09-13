@@ -387,5 +387,49 @@ console.log("\n[13] 조회 결과를 중간에 저장한다");
   ok("저장한 뒤 비운다", /updates\.clear\(\)/.test(loop), "clear 가 없음");
 }
 
+// ── [14] 채우기가 옛 명단의 빈 만료 시각을 되메운다 ─────────
+// 팝업 '담기'에 넣으면 절대 안 돈다. runScan 이 imports 에 담기 전에 이미
+// 명단에 있는 사람을 걸러내기 때문이다 ("이미 명단에 있는 사람은 빼고
+// 보여줍니다"). v1.7.8이 그걸 놓치고 팝업에 넣었다가, 완장에게 눌러도 아무
+// 일도 안 일어나는 절차를 안내했다 (2026-09-13).
+//
+// 그래서 이 검사는 **실제 runScan 을 돌려서** 본다. imports 를 지어내지 않는다.
+console.log("\n[14] 채우기가 옛 명단의 빈 만료 시각을 되메운다");
+{
+  const AUG1 = new Date("2026-08-01T10:00:00").getTime();
+  const EXP = AUG1 + 744 * 3600 * 1000;
+
+  world.clear(); requests = []; failNextFetch = null; breakTable = false;
+  put("old1111", { state: "차단 중", date: "2026.08.01", time: "10:00:00" });
+  put("old2222", { state: "차단 중", date: "2026.08.01", time: "10:00:00" });
+  put("new3333", { state: "차단 중", date: "2026.08.01", time: "10:00:00" });
+
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 20, autoApply: false, notify: false },
+    watchlist: [
+      { kind: "code", value: "old1111", reason: "음란성", enabled: true, nextCheckAt: 0 },
+      { kind: "code", value: "old2222", reason: "음란성", enabled: true, nextCheckAt: 99 },
+    ],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+
+  await send({ type: "scan", pages: 3 });
+
+  const byCode = new Map(stored.watchlist.map((t) => [t.value, t]));
+  eq("빈 사람은 채워진다", byCode.get("old1111").nextCheckAt, EXP + 60000);
+  eq("이미 값이 있는 사람은 안 건드린다", byCode.get("old2222").nextCheckAt, 99);
+  ok("채운 인원을 기록에 남긴다", /이미 명단에 있던 1명의 만료 예정 시각을 채웠습니다/.test(logText()),
+     logText());
+
+  // 새 사람은 여전히 imports 로 간다. 되메우기가 그걸 가로채면 안 된다.
+  ok("명단에 없는 사람은 채우기 목록에 뜬다",
+     (stored.imports || []).some((i) => i.code === "new3333"),
+     JSON.stringify((stored.imports || []).map((i) => i.code)));
+  ok("이미 명단에 있는 사람은 채우기 목록에 안 뜬다",
+     !(stored.imports || []).some((i) => i.code === "old1111"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
