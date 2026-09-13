@@ -534,9 +534,33 @@ console.log("\n[17] manual 판정은 누구인지까지 적는다");
   ok("후보로 올리지 않는다", !(stored.candidates || []).some((c) => c.code === "early001"));
   ok("몇 명인지 적는다", /1명은 차단 기간이 남았는데 해제돼 있습니다/.test(log), log);
   // 코드 글자만 찾으면 다른 줄에 우연히 섞여도 통과한다. 그 줄의 모양까지 본다.
-  ok("누구인지 적는다", /early001 — 31일 차단이 .*끝날 예정이었는데/.test(log), log);
-  ok("언제 끝날 예정이었는지 적는다", /끝날 예정이었는데/.test(log), log);
+  ok("누구인지 적는다", /early001 — 31일 차단\(.*처리\)이/.test(log), log);
+  ok("언제 끝날 예정인지 적는다", /끝날 예정인데 지금 이미 풀려 있습니다/.test(log), log);
+  // 디시는 해제 시각을 안 알려준다. 안다고 적으면 거짓말이 된다.
+  ok("해제 시각을 안다고 하지 않는다", !/에 풀렸습니다/.test(log), log);
+  // 예정까지 얼마나 남았는지가 진단 숫자다. 며칠이면 민원 해제, 몇 분이면 오판 의심.
+  ok("예정보다 얼마나 이른지 적는다", /예정보다 \d+(분|시간|일) 이릅니다/.test(log), log);
   ok("만료된 사람은 후보로 간다", (stored.candidates || []).some((c) => c.code === "ripe0002"));
+}
+
+// ── [18] 갤로그 예상 시간이 조회 시간까지 센다 ──────────────
+// 간격만 세면 모자라고, 모자라면 완장이 멈춘 줄 알고 기다리다 새로고침한다.
+// v1.7.4 에서 차단 목록 쪽에 같은 것을 고쳤는데 갤로그 쪽을 빠뜨렸다.
+// 164명에 '4분'이라 해놓고 5분 7초가 걸렸다 (파딱 2026-09-13).
+console.log("\n[18] 갤로그 예상 시간");
+{
+  const bg = readFileSync(new URL("./background.js", import.meta.url), "utf8");
+  const i = bg.indexOf("갤로그 점검: ${targets.length}명을 확인합니다");
+  ok("갤로그 안내가 있다", i > 0);
+  const around = bg.slice(Math.max(0, i - 900), i);
+  ok("간격만 세지 않는다", /GALLOG_FETCH_SECS/.test(around), around.slice(-300));
+
+  // 실측과 맞는지. 164명 5분 7초였으니 5분 아래로 답하면 모자란 것이다.
+  const per = dcMod.GALLOG_DELAY_MS / 1000 + dcMod.GALLOG_FETCH_SECS;
+  const mins = Math.ceil(Math.round(164 * per) / 60);
+  ok("164명을 5분 이상으로 잡는다", mins >= 5, `${mins}분`);
+  // 너무 부풀려도 안 된다. 두 배로 말하면 완장이 안 돌린다.
+  ok("164명을 8분 넘게 잡지는 않는다", mins <= 8, `${mins}분`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -487,7 +487,7 @@ $("manualBody").addEventListener("click", async (e) => {
       reason: (t && t.reason) || m.reason || "음란성",
       memo: (t && t.memo) || "",
       prevDuration: m.duration || "31일",
-      prevHandled: m.releasedFrom || "",
+      prevHandled: m.handledAt || "",
     });
     state.manual = state.manual.filter((x) => x.code !== back);
     await chrome.storage.local.set({ candidates: state.candidates, manual: state.manual });

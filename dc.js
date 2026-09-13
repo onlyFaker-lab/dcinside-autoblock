@@ -34,6 +34,19 @@ export const REASON_TXT_MAX = 20;
 // '6분쯤'이라고 해놓고 8~9분이 걸려 멈춘 줄 알았다고 한다.
 export const FETCH_SECS = 0.5;
 
+// 갤로그는 차단 목록보다 느리다. 예상 시간을 낼 때 FETCH_SECS 를 같이 쓰면 모자란다.
+//
+// 파딱 실측 (2026-09-13):
+//   차단 목록 300명  6분 53초 → 한 명당 1.38초 → 간격 1.2초를 빼면 조회 0.18초
+//   갤로그     164명  5분 07초 → 한 명당 1.87초 → 간격 1.2초를 빼면 조회 0.67초
+//
+// 갤로그 점검은 이 값조차 안 쓰고 간격만 세고 있었다(164명에 '4분', 실제 5분 7초).
+// v1.7.4 에서 차단 목록 쪽을 고칠 때 이 함수를 같이 안 고쳤다.
+//
+// ⚠ 모자라게 잡지 말 것. 완장이 멈춘 줄 알고 기다리다 새로고침한다.
+//    넉넉한 쪽이 낫다.
+export const GALLOG_FETCH_SECS = 0.7;
+
 // 갤로그 기록 두 벌을 합친다. 완장이 여럿이면 같은 사람을 각자 조회하게 되는데,
 // 한 명이 한 바퀴 돌고 파일로 넘기면 나머지는 조회 0번으로 기준점을 얻는다.
 // 부담이 제일 큰 첫 한 바퀴를 통째로 건너뛰는 것이다 (파딱 제안 2026-09-10).
@@ -858,6 +871,13 @@ export function expiresAt(row) {
 // 예정 만료 시각 전에 '해제됨'이 됐다면 사람이 직접 푼 것이다.
 // (신문고 민원 등으로 완장이 풀어준 경우) 이걸 자동 재차단하면
 // 완장의 판단을 12시간 만에 뒤집어버린다.
+// ⚠ 해제 시각이 아니라 **지금 시각**을 예정 만료와 견준다.
+// 디시가 해제 시각을 안 알려주기 때문이다. "지금인데 아직 만료 예정이 안 지났고,
+// 그런데 이미 풀려 있다" → 사람이 풀었다고 본다.
+//
+// 그래서 이 판정은 언제 조회하느냐에 달려 있다. 차단 중인 사람은 만료 1분 뒤에
+// 보러 가도록 잡혀 있어서(analyzeCode 의 active 갈래) 보통은 만료 후에 본다.
+// 만료 전에 보게 되는 건 점검(sweep)으로 뽑혔을 때다.
 export function isManualRelease(row, now = new Date()) {
   if (!row.released) return false;
   const exp = expiresAt(row);
@@ -910,7 +930,12 @@ export function analyzeCode(rows, code, entry = {}, now = new Date()) {
       kind: latest.identity.kind,
       nick: latest.identity.nick,
       reason: entry.reason || latest.reason || "음란성",
-      releasedFrom: `${latest.date} ${latest.time}`.trim(),
+      // ⚠ 이건 '해제된 시각'이 아니라 '차단을 건 시각'이다.
+      // 디시 차단 목록은 해제 시각을 알려주지 않는다. 언제 풀렸는지는 모른다.
+      // 우리가 아는 건 '지금 보니 이미 풀려 있다'는 것뿐이다.
+      // v1.7.10 초안에서 이걸 해제 시각인 줄 알고 기록에 "…에 풀렸습니다"라고
+      // 적었다가 잡았다. 이름을 사실대로 바꾼다.
+      handledAt: `${latest.date} ${latest.time}`.trim(),
       // chrome.storage는 Date 객체를 담지 못하고 빈 값으로 바꾼다. 숫자로 넘긴다.
       wouldExpire: exp ? exp.getTime() : null,
       duration: latest.duration,

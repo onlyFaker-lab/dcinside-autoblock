@@ -6,7 +6,8 @@
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
   collectActivity, checkGallog, pickGallogTargets,
-  isBusy, localDateKey, jitter, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK,
+  isBusy, localDateKey, jitter, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FETCH_SECS,
+  GALLOG_FAIL_STREAK,
   rowHealth, carryOver,
 } from "./dc.js";
 
@@ -100,6 +101,15 @@ function fmtWhen(ms) {
   const d = new Date(ms);
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// 예정 만료까지 남은 시간을 사람 말로. 이 숫자가 manual 판정의 진단이 된다.
+function fmtLeft(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 60) return `${m}분`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}시간`;
+  return `${Math.round(h / 24)}일`;
 }
 
 async function log(message) {
@@ -421,9 +431,17 @@ async function runCheck({ auto = false } = {}) {
     // 안전장치다. 잘못 판정하면 막아야 할 사람을 조용히 놓친다. 그래서 완장이
     // 실물과 대조할 수 있어야 한다.
     for (const m of allManual) {
+      // ⚠ 디시는 해제 시각을 알려주지 않는다. 우리가 아는 건 '지금 보니 풀려 있다'뿐이다.
+      // 그러니 "언제 풀렸다"고 적으면 거짓말이 된다.
+      //
+      // 대신 예정 만료까지 얼마나 남았는지를 적는다. 이 숫자가 진단이 된다.
+      //   며칠 남았다  → 민원 등으로 완장이 직접 푼 것이 맞다
+      //   몇 분 남았다 → 디시가 만료를 조금 일찍 처리한 것일 수 있다 (오판 의심)
+      const left = m.wouldExpire ? m.wouldExpire - Date.now() : 0;
       await log(
-        `  ${m.label || m.code} — ${m.duration} 차단이 ${fmtWhen(m.wouldExpire)}에 끝날 예정이었는데 ` +
-        `${m.releasedFrom}에 풀렸습니다.`
+        `  ${m.label || m.code} — ${m.duration} 차단(${m.handledAt} 처리)이 ` +
+        `${fmtWhen(m.wouldExpire)}에 끝날 예정인데 지금 이미 풀려 있습니다. ` +
+        `예정보다 ${fmtLeft(left)} 이릅니다.`
       );
     }
   }
@@ -1059,7 +1077,12 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
 
   // 인원이 적으면 몇 초다. Math.ceil로 분만 쓰면 2명짜리도 '1분'이 되어
   // 안내가 실제와 안 맞는다(2026-09-08 실제로 3초 걸린 작업에 1분이라고 했다).
-  const secs = Math.round((targets.length * GALLOG_DELAY_MS) / 1000);
+  // 간격만 세면 모자란다. 한 명당 조회 시간이 그 위에 붙는다.
+  // 164명에 '4분'이라 해놓고 5분 7초가 걸렸다 (파딱 2026-09-13).
+  // v1.7.4 에서 차단 목록 쪽에 같은 것을 고쳤는데 여기를 빠뜨렸다.
+  const secs = Math.round(
+    targets.length * (GALLOG_DELAY_MS / 1000 + GALLOG_FETCH_SECS)
+  );
   const eta = secs < 60 ? `${secs}초` : `${Math.ceil(secs / 60)}분`;
   await setStatus(`갤로그 확인 중 (0/${targets.length})`, true);
   await log(`갤로그 점검: ${targets.length}명을 확인합니다. 한 명당 한 번씩 요청합니다.`);
