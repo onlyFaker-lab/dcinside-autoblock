@@ -872,7 +872,13 @@ export function isManualRelease(row, now = new Date()) {
 //
 // nextCheckAt: 이 사람을 언제 다시 볼지. 31일 차단 중인 사람을 매번 조회하는 건
 // 낭비다. 명단이 수만 명이 되면 그 낭비가 전부다.
-export function analyzeCode(rows, code, entry, now = new Date()) {
+// entry 는 명단에 적힌 그 사람 정보다. 사유 승계에 쓴다.
+// 기본값을 {} 로 둔 이유: v1.7.6 에서 재확인 루프가 이걸 빼먹고 부르는 바람에
+// candidate 갈래의 entry.reason 에서 터졌다. 하필 '재차단해야 할 사람이 있을 때'만
+// 터져서, 아무 일도 안 해도 되는 날에만 멀쩡해 보였다.
+// 빠뜨려도 죽지는 않게 한다. 다만 넘기지 않으면 직접 입력 사유가 승계되지 않으므로
+// 부르는 쪽은 반드시 넘겨야 한다 (검사가 사유 승계를 따로 본다).
+export function analyzeCode(rows, code, entry = {}, now = new Date()) {
   const mine = rows.filter((r) => r.identity && r.identity.matchKey === code);
   const day = 24 * 3600 * 1000;
 
@@ -899,6 +905,11 @@ export function analyzeCode(rows, code, entry, now = new Date()) {
       status: "manual",
       code,
       label: latest.identity.label,
+      // 완장이 "내가 푼 게 아닌데"라고 하면 후보로 되돌릴 수 있어야 한다.
+      // 그러려면 후보와 같은 모양으로 만들 재료가 여기 있어야 한다.
+      kind: latest.identity.kind,
+      nick: latest.identity.nick,
+      reason: entry.reason || latest.reason || "음란성",
       releasedFrom: `${latest.date} ${latest.time}`.trim(),
       // chrome.storage는 Date 객체를 담지 못하고 빈 값으로 바꾼다. 숫자로 넘긴다.
       wouldExpire: exp ? exp.getTime() : null,

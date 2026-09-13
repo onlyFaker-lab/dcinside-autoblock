@@ -1161,5 +1161,35 @@ console.log("\n[로그인 풀림 감지]");
      `${BUSY_TIMEOUT_MS / 60000}분`);
 }
 
+// ── [26] analyzeCode 는 entry 없이 불러도 죽지 않는다 ───────
+// v1.7.6 이 재확인 루프에서 entry 를 빼먹고 불러 candidate 갈래에서 터졌다.
+// 하필 '재차단할 사람이 있을 때'만 터져서 아무 일도 안 해도 되는 날엔 멀쩡해 보였다.
+// 이제 기본값이 {} 라 구조적으로 못 터진다. 그 기본값을 지우면 이 검사가 잡는다.
+//
+// 다만 넘기지 않으면 직접 입력 사유가 승계되지 않는다. 그것도 같이 본다.
+{
+  console.log("\n[26] entry 없이 불러도 죽지 않는다");
+  const one = (o) => parseBlockList(table([row(o)]));
+  const at = (s) => new Date(s);
+  const natural = one({ nik: "ㅇㅇ", code: "aaa1111", date: "2026.08.01", time: "10:00:00", reason: "음란성" });
+  const early = one({ nik: "ㅇㅇ", code: "bbb2222", date: "2026.09.05", time: "10:00:00", reason: "음란성" });
+
+  let r = null, threw = false;
+  try { r = analyzeCode(natural, "aaa1111", undefined, at("2026-09-06T12:00:00")); }
+  catch { threw = true; }
+  ok("candidate 갈래가 터지지 않는다", !threw);
+  eq("판정은 그대로", r && r.status, "candidate");
+
+  threw = false;
+  try { analyzeCode(early, "bbb2222", undefined, at("2026-09-06T12:00:00")); }
+  catch { threw = true; }
+  ok("manual 갈래도 터지지 않는다", !threw);
+
+  // 넘기면 명단의 사유가 이긴다. 파딱 갤 4533명이 전원 직접 입력 사유라 중요하다.
+  const withEntry = analyzeCode(natural, "aaa1111", { reason: "벌레" }, at("2026-09-06T12:00:00"));
+  eq("entry 를 넘기면 그 사유를 쓴다", withEntry.candidate.reason, "벌레");
+  eq("안 넘기면 목록의 사유로 떨어진다", r.candidate.reason, "음란성");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -94,6 +94,14 @@ async function setStatus(text, busy) {
   });
 }
 
+// 기록에 넣을 시각 문구. chrome.storage 는 Date 를 못 담아서 숫자로 들고 다닌다.
+function fmtWhen(ms) {
+  if (!ms) return "언제인지 모름";
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 async function log(message) {
   const { logs = [] } = await chrome.storage.local.get("logs");
   logs.push({ time: Date.now(), message });
@@ -217,6 +225,7 @@ async function runCheck({ auto = false } = {}) {
 
   const candidates = [];
   const manual = [];
+  const deletedSkipped = [];     // 탈퇴로 확인돼 후보에서 뺀 사람
   const updates = new Map();     // code → 갱신할 값
   let retired = 0;
   let parseFailures = 0;   // 표에 있는 행을 못 읽음
@@ -277,7 +286,14 @@ async function runCheck({ auto = false } = {}) {
       }
       updates.set(entry.value, upd);
 
-      if (result.status === "candidate") candidates.push(result.candidate);
+      if (result.status === "candidate") {
+        // 탈퇴가 확인된 계정은 후보로 올리지 않는다. 디시가 "차단되었습니다"라고
+        // 답하면서 실제로는 안 거는 계정이라(2026-09-13 파딱 갤 before3180·core7792),
+        // 보내봐야 매번 실패로 끝나고 하루 차단 한도만 축낸다.
+        // 명단에서 지우는 건 완장이 '명단 → 빼기'에서 판단할 몫이므로 여기선 건너뛰기만 한다.
+        if (entry.gallogState === "deleted") deletedSkipped.push(entry.value);
+        else candidates.push(result.candidate);
+      }
       if (result.status === "manual") manual.push(result);
 
       // 조회 진행 상황은 많을 때만 띄엄띄엄 남긴다
@@ -395,6 +411,39 @@ async function runCheck({ auto = false } = {}) {
       `[안내] ${allManual.length}명은 차단 기간이 남았는데 해제돼 있습니다. ` +
       `완장이 직접 풀어준 것으로 보여 재차단하지 않았습니다.`
     );
+    // 누구인지 적는다. 숫자만 적으면 나중에 "그 판정이 맞았나"를 확인할 수가 없다.
+    //
+    // 2026-09-13 파딱 갤에서 3명이 이 판정을 받았는데, 화면에서 '명단에서 빼기'를
+    // 누르면 명단과 이 기록을 한꺼번에 지운다. 나중에 누구였는지 물었을 때
+    // 확인할 방법이 아무 데도 없었다. 기록만이 유일하게 남는 자리다.
+    //
+    // 이 판정은 신문고 민원으로 풀어준 사람을 12시간 만에 다시 막는 걸 막는
+    // 안전장치다. 잘못 판정하면 막아야 할 사람을 조용히 놓친다. 그래서 완장이
+    // 실물과 대조할 수 있어야 한다.
+    for (const m of allManual) {
+      await log(
+        `  ${m.label || m.code} — ${m.duration} 차단이 ${fmtWhen(m.wouldExpire)}에 끝날 예정이었는데 ` +
+        `${m.releasedFrom}에 풀렸습니다.`
+      );
+    }
+  }
+  // 이 판정은 사후 확인이 안 된다. 처리한 신고글은 지워지고 삭제 목록에는 검색이
+  // 없어서, 나중에 "내가 푼 게 맞나"를 되짚을 수가 없다 (파딱 확인 2026-09-13).
+  // 그래서 그 순간에 알린다. 후보가 없는 날에도 이건 알려야 한다.
+  if (settings.notify && manual.length) {
+    notify(
+      "직접 풀어준 것으로 보이는 사람",
+      `${manual.length}명은 재차단하지 않았습니다. 맞는지 확인해 주세요.`
+    );
+  }
+  if (deletedSkipped.length) {
+    // 조용히 빼면 안 된다. 완장이 보기엔 만료됐는데 후보에 안 뜨는 사람이 생긴다.
+    await log(
+      `[안내] ${deletedSkipped.length}명은 차단이 풀렸지만 탈퇴한 계정이라 후보에서 뺐습니다: ` +
+      `${deletedSkipped.slice(0, 10).join(", ")}` +
+      (deletedSkipped.length > 10 ? ` 외 ${deletedSkipped.length - 10}명` : "")
+    );
+    await log(`  탈퇴한 계정은 디시가 차단을 걸어주지 않습니다. '명단 → 빼기'에서 지우실 수 있습니다.`);
   }
   if (carried) {
     await log(`[안내] 이번에 조회하지 않은 후보 ${carried}명은 목록에 그대로 뒀습니다.`);
@@ -545,6 +594,8 @@ async function runApply() {
   let remaining = [];
   let limitHit = false;
   let limitMessage = "";
+  // 탈퇴가 확인된 사람. 차단이 걸리지 않으므로 명단에 표시해 두고 후보에서 뺀다.
+  const gone = [];
 
   try {
     for (const [reason, group] of Object.entries(byReason)) {
@@ -563,6 +614,44 @@ async function runApply() {
       );
       const done = new Set(result.verified);
       await log(`  → ${result.message}`);
+
+      // 실패한 사람은 갤로그를 한 번 본다.
+      //
+      // 2026-09-13 파딱 갤: 37건을 한 묶음으로 보냈더니 디시가 "차단되었습니다"라고
+      // 답했는데 실제로는 35건만 걸렸다. 못 걸린 before3180·core7792 를 갤로그에서
+      // 찾아보니 둘 다 "삭제된 갤로그입니다" 였다. 탈퇴한 계정은 차단이 안 걸린다.
+      //
+      // 묶음 응답은 개별 결과를 알려주지 않으므로 왜 실패했는지는 여기서만 알 수 있다.
+      // 원인을 안 적어두면 완장은 매번 같은 사람이 실패하는 걸 보면서 이유를 모른다.
+      // 요청은 실패한 사람 수만큼만 나가고, 그 수는 maxPerRun 으로 막혀 있다.
+      const failedCodes = (result.failed || []).slice();
+      const goneCodes = [];
+      if (failedCodes.length) {
+        await log(`  실패한 ${failedCodes.length}명이 탈퇴했는지 갤로그를 봅니다.`);
+        for (const code of failedCodes) {
+          const g = await checkGallog(code);
+          if (g.state === "deleted") goneCodes.push(code);
+          await new Promise((r) => setTimeout(r, jitter(GALLOG_DELAY_MS)));
+          await touchBusy();
+        }
+        if (goneCodes.length) {
+          await log(
+            `  ${goneCodes.length}명은 탈퇴한 계정입니다: ${goneCodes.join(", ")}`
+          );
+          await log(
+            `  탈퇴한 계정은 차단이 걸리지 않습니다. 후보로 다시 올리지 않겠습니다. ` +
+            `명단에서 지우시려면 '명단 → 빼기'에서 탈퇴로 표시돼 있습니다.`
+          );
+        }
+        const other = failedCodes.filter((c) => !goneCodes.includes(c));
+        if (other.length) {
+          await log(
+            `  ${other.length}명은 탈퇴가 아닌데 안 걸렸습니다: ${other.join(", ")} ` +
+            `— 다음 확인 때 다시 후보로 올라옵니다.`
+          );
+        }
+      }
+      gone.push(...goneCodes);
 
       if (result.limitHit) {
         limitHit = true;
@@ -587,6 +676,14 @@ async function runApply() {
   }
 
   // 재차단에 성공했으면 31일 뒤에 다시 보면 된다
+  // 탈퇴 표시를 명단에 남긴다. 이걸 저장해두지 않으면 다음 확인 때 또 후보가 되고
+  // 또 보내고 또 실패한다. 완장은 같은 이름이 매번 실패하는 것만 보게 된다.
+  if (gone.length) {
+    const g = new Map();
+    for (const c of gone) g.set(c, { gallogState: "deleted", gallogCheckedAt: Date.now() });
+    await saveWatchlistUpdates(g);
+  }
+
   const okCodes = new Set(records.filter((r) => r.ok).map((r) => r.code));
   if (okCodes.size) {
     const next = Date.now() + HOURS_31D * 3600 * 1000 + 60 * 1000;

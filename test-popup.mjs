@@ -586,5 +586,62 @@ console.log("\n[채우기 → 명단, 만료 예정 시각]");
      alerts.join(" | "));
 }
 
+// ── 직접 풀어준 것으로 본 판정을 되돌리기 ──────────────────
+// 이 판정은 사후 확인이 안 된다. 처리한 신고글은 지워지고 삭제 목록에는 검색이
+// 없다(파딱 확인 2026-09-13). 그러니 완장이 이 화면을 보는 그 순간에 뒤집을 수
+// 있어야 한다. 판정이 틀렸는데 그대로 두면 막아야 할 사람을 조용히 놓친다.
+console.log("\n[직접 풀어준 판정 되돌리기]");
+{
+  await seed({
+    manual: [{ code: "aaa1111", label: "ㅇㅇ (aaa1111)", kind: "code", nick: "ㅇㅇ",
+               duration: "31일", releasedFrom: "2026.09.05 10:00:00",
+               wouldExpire: new Date("2026-10-01T10:00:00").getTime() }],
+    watchlist: [{ kind: "code", value: "aaa1111", reason: "벌레", memo: "메모", enabled: true }],
+    candidates: [],
+  });
+
+  ok("표에 되돌리기 버튼이 있다", /data-back="aaa1111"/.test(els.get("manualBody").innerHTML),
+     els.get("manualBody").innerHTML);
+
+  confirmAnswer = true;
+  els.get("manualBody").dispatchEvent({
+    type: "click", target: makeEl("", "button", { dataset: { back: "aaa1111" } }) });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const c = (stored.candidates || []).find((x) => x.code === "aaa1111");
+  ok("후보로 올라간다", !!c, JSON.stringify(stored.candidates));
+  ok("명단의 사유를 그대로 쓴다", c && c.reason === "벌레", c && c.reason);
+  ok("메모도 따라간다", c && c.memo === "메모", c && c.memo);
+  ok("직접 풀어준 목록에서 빠진다", !(stored.manual || []).some((m) => m.code === "aaa1111"));
+  ok("명단에서는 안 지운다", (stored.watchlist || []).some((t) => t.value === "aaa1111"));
+}
+
+// 빼기 버튼은 기록까지 지운다. 지우기 전에 그 사실을 알려야 한다.
+console.log("\n[직접 풀어준 사람 명단에서 빼기]");
+{
+  await seed({
+    manual: [{ code: "bbb2222", label: "ㅇㅇ (bbb2222)", duration: "31일",
+               releasedFrom: "2026.09.05 10:00:00", wouldExpire: Date.now() }],
+    watchlist: [{ kind: "code", value: "bbb2222", reason: "음란성", enabled: true }],
+  });
+
+  confirmAnswer = false;   // 물어보는지부터 본다
+  confirmTexts.length = 0;
+  els.get("manualBody").dispatchEvent({
+    type: "click", target: makeEl("", "button", { dataset: { drop: "bbb2222" } }) });
+  await new Promise((r) => setTimeout(r, 0));
+
+  ok("확인을 받는다", confirmTexts.length === 1, String(confirmTexts.length));
+  ok("확인할 수 없게 된다고 알린다", /확인할 수 없습니다/.test(confirmTexts.join(" ")), confirmTexts.join(" | "));
+  ok("작업 기록에는 남는다고 알린다", /작업 기록에는 남아/.test(confirmTexts.join(" ")));
+  ok("취소하면 그대로다", (stored.watchlist || []).some((t) => t.value === "bbb2222"));
+
+  confirmAnswer = true;
+  els.get("manualBody").dispatchEvent({
+    type: "click", target: makeEl("", "button", { dataset: { drop: "bbb2222" } }) });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("확인하면 빠진다", !(stored.watchlist || []).some((t) => t.value === "bbb2222"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

@@ -40,6 +40,7 @@ globalThis.setTimeout = (fn, _ms, ...rest) => realSetTimeout(fn, 0, ...rest);
 // 검사가 못 보게 된다 (원칙 1번).
 
 const world = new Map();   // code → { state, duration, date, time, reason, nik }
+const deleted = new Set(); // 탈퇴한 계정. 차단 요청을 받아도 실제로는 안 걸린다.
 let requests = [];         // 나간 요청 전부. 몇 번 나갔는지가 이 프로젝트에선 중요하다.
 let failNextFetch = null;  // 다음 조회를 실패시킬 때
 let breakTable = false;    // 상태 칸을 못 읽는 표를 돌려줄 때
@@ -73,9 +74,23 @@ const fakeFetch = async (url, opts = {}) => {
     const label = Object.entries(dcMod.HOURS_BY_LABEL)
       .find(([, h]) => String(h) === body.get("avoid_hour"))?.[0] || "31일";
     for (const c of codes) {
+      // 탈퇴한 계정은 걸리지 않는다. 그런데도 디시는 묶음 전체에 성공 하나를 돌려준다.
+      // 2026-09-13 파딱 갤에서 실제로 이랬다. 응답만 흉내내면 이 성질을 검사가 못 본다.
+      if (deleted.has(c)) continue;
       put(c, { ...world.get(c), state: "차단 중", duration: label, date: "2026.09.12", time: "12:00:00" });
     }
     return { ok: true, text: async () => JSON.stringify({ result: true, msg: "차단되었습니다" }) };
+  }
+
+  if (String(url).includes("gallog.dcinside.com")) {
+    const code = String(url).split("/").pop();
+    if (deleted.has(code)) {
+      // 실물 응답: 404 + 스크립트 한 줄뿐이다 (dc.js 주석에 실측이 적혀 있다).
+      return { ok: false, status: 404, url: String(url),
+        text: async () => `<script>location.replace("https://gallog.dcinside.com/_error/deleted");</script>` };
+    }
+    return { ok: true, status: 200, url: String(url),
+      text: async () => `<html><body>갤로그 <span class="num">12</span></body></html>` };
   }
 
   const u = new URL(String(url));
@@ -163,6 +178,7 @@ function send(msg) {
 // ── 판 깔기 ──────────────────────────────────────────────────
 async function setup({ codes, recheck = true, maxPerRun = 100, candidatesAt = Date.now() }) {
   world.clear();
+  deleted.clear();
   intervals.length = 0;
   requests = [];
   failNextFetch = null;
@@ -429,6 +445,98 @@ console.log("\n[14] 채우기가 옛 명단의 빈 만료 시각을 되메운다
      JSON.stringify((stored.imports || []).map((i) => i.code)));
   ok("이미 명단에 있는 사람은 채우기 목록에 안 뜬다",
      !(stored.imports || []).some((i) => i.code === "old1111"));
+}
+
+// ── [15] 탈퇴한 계정: 디시는 성공이라 답하고 안 건다 ─────────
+// 2026-09-13 파딱 갤. 37건을 한 묶음으로 보냈더니 "차단되었습니다"라고 답했는데
+// 실제로는 35건만 걸렸다. 못 걸린 둘은 갤로그가 '삭제된 갤로그'였고, 관리 화면에서도
+// 계속 '해제됨'이었다. 묶음 응답은 개별 결과를 안 알려주므로 목록을 다시 읽어야만
+// 알 수 있다. 원칙 1번이 실전에서 값을 한 자리다.
+console.log("\n[15] 탈퇴한 계정은 실패로 잡고 이유까지 밝힌다");
+{
+  await setup({ codes: { live0001: {}, gone0002: {} }, recheck: false });
+  deleted.add("gone0002");
+
+  await send({ type: "apply" });
+  const log = logText();
+
+  ok("살아 있는 사람은 걸렸다", isBlocked("live0001"));
+  ok("탈퇴한 사람은 안 걸렸다", !isBlocked("gone0002"));
+  ok("성공으로 적지 않는다", /1건 실패|실패: gone0002/.test(log), log);
+  ok("탈퇴라고 이유를 밝힌다", /탈퇴한 계정입니다.*gone0002/.test(log), log);
+  ok("명단에 탈퇴로 표시한다",
+     (stored.watchlist.find((t) => t.value === "gone0002") || {}).gallogState === "deleted",
+     JSON.stringify(stored.watchlist.find((t) => t.value === "gone0002")));
+  ok("살아 있는 사람은 표시하지 않는다",
+     !(stored.watchlist.find((t) => t.value === "live0001") || {}).gallogState);
+}
+
+// ── [16] 탈퇴로 표시된 사람은 다시 후보가 되지 않는다 ────────
+// 표시만 하고 거르지 않으면 다음 확인 때 또 후보가 되고 또 보내고 또 실패한다.
+// 하루 차단 한도만 축낸다.
+console.log("\n[16] 탈퇴 표시된 사람은 후보에서 뺀다");
+{
+  world.clear(); requests = []; deleted.clear(); intervals.length = 0;
+  put("gone0002", { state: "해제됨", date: "2026.08.01", time: "10:00:00" });
+  put("live0001", { state: "해제됨", date: "2026.08.01", time: "10:00:00" });
+  deleted.add("gone0002");
+
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [
+      { kind: "code", value: "live0001", reason: "음란성", enabled: true, nextCheckAt: 0 },
+      { kind: "code", value: "gone0002", reason: "음란성", enabled: true, nextCheckAt: 0,
+        gallogState: "deleted" },
+    ],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+
+  await send({ type: "check" });
+  const codes = (stored.candidates || []).map((c) => c.code);
+
+  ok("살아 있는 사람은 후보가 된다", codes.includes("live0001"), JSON.stringify(codes));
+  ok("탈퇴한 사람은 후보가 안 된다", !codes.includes("gone0002"), JSON.stringify(codes));
+  ok("뺐다는 사실을 밝힌다", /탈퇴한 계정이라 후보에서 뺐습니다/.test(logText()), logText());
+  ok("어느 코드인지 적는다", /gone0002/.test(logText()));
+}
+
+// ── [17] 완장이 직접 푼 것으로 본 사람은 누구인지 적는다 ────
+// 숫자만 적으면 나중에 그 판정이 맞았는지 확인할 방법이 없다.
+// 2026-09-13 파딱 갤에서 3명이 이 판정을 받았는데, 화면의 '명단에서 빼기'가
+// 명단과 manual 기록을 한꺼번에 지워서 누구였는지 영영 확인할 수 없게 됐다.
+// 기록만이 유일하게 남는 자리다.
+console.log("\n[17] manual 판정은 누구인지까지 적는다");
+{
+  world.clear(); requests = []; deleted.clear(); intervals.length = 0;
+  // 31일 차단인데 예정보다 한참 일찍 풀렸다 → 완장이 직접 푼 것으로 본다
+  put("early001", { state: "해제됨", date: "2026.09.10", time: "10:00:00" });
+  // 만료돼서 풀렸다 → 재차단 후보
+  put("ripe0002", { state: "해제됨", date: "2026.08.01", time: "10:00:00" });
+
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [
+      { kind: "code", value: "early001", reason: "음란성", enabled: true, nextCheckAt: 0 },
+      { kind: "code", value: "ripe0002", reason: "음란성", enabled: true, nextCheckAt: 0 },
+    ],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+
+  await send({ type: "check" });
+  const log = logText();
+
+  ok("직접 푼 것으로 판정한다", (stored.manual || []).some((m) => m.code === "early001"),
+     JSON.stringify(stored.manual));
+  ok("후보로 올리지 않는다", !(stored.candidates || []).some((c) => c.code === "early001"));
+  ok("몇 명인지 적는다", /1명은 차단 기간이 남았는데 해제돼 있습니다/.test(log), log);
+  // 코드 글자만 찾으면 다른 줄에 우연히 섞여도 통과한다. 그 줄의 모양까지 본다.
+  ok("누구인지 적는다", /early001 — 31일 차단이 .*끝날 예정이었는데/.test(log), log);
+  ok("언제 끝날 예정이었는지 적는다", /끝날 예정이었는데/.test(log), log);
+  ok("만료된 사람은 후보로 간다", (stored.candidates || []).some((c) => c.code === "ripe0002"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

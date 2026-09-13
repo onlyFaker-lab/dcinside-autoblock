@@ -118,6 +118,7 @@ function render() {
       <td>${esc(m.duration)}</td>
       <td class="muted">${fmtTime(m.wouldExpire)}</td>
       <td style="text-align:right">
+        <button class="linkbtn" data-back="${esc(m.code)}">내가 푼 게 아님</button>
         <button class="linkbtn" data-drop="${esc(m.code)}">명단에서 빼기</button>
       </td>
     </tr>`).join("");
@@ -458,9 +459,53 @@ $("btnSave").addEventListener("click", async () => {
 });
 
 $("manualBody").addEventListener("click", async (e) => {
+  // '내가 푼 게 아님' — 이 판정을 뒤집어 재차단 후보로 올린다.
+  //
+  // 이 판정은 사후에 확인할 방법이 없다. 파딱 확인(2026-09-13): 처리한 신고글은
+  // 지워버리고 삭제 목록에는 검색 기능이 없어서, 나중에 "내가 푼 게 맞나"를
+  // 되짚을 수가 없다. 그러니 완장이 이 화면을 보는 그 순간에 판단할 수 있어야 한다.
+  //
+  // 판정이 틀렸을 때(중복 차단으로 옛 행이 일찍 해제된 경우 등) 그대로 두면
+  // 막아야 할 사람을 조용히 놓친다. 되돌릴 길을 열어둔다.
+  const back = e.target.dataset.back;
+  if (back) {
+    const m = state.manual.find((x) => x.code === back);
+    if (!m) return;
+    if (!confirm(
+      `'${m.label || back}' 를 재차단 후보로 올릴까요?\n\n` +
+      `민원 등으로 직접 풀어준 분이라면 올리지 마세요. ` +
+      `재차단하면 완장의 판단을 뒤집는 것이 됩니다.`
+    )) return;
+
+    // 후보와 같은 모양으로 만든다. 사유는 명단에 적힌 것을 그대로 쓴다.
+    const t = state.watchlist.find((x) => x.value === back);
+    state.candidates.push({
+      code: back,
+      kind: m.kind || "code",
+      label: m.label || back,
+      nick: m.nick || "",
+      reason: (t && t.reason) || m.reason || "음란성",
+      memo: (t && t.memo) || "",
+      prevDuration: m.duration || "31일",
+      prevHandled: m.releasedFrom || "",
+    });
+    state.manual = state.manual.filter((x) => x.code !== back);
+    await chrome.storage.local.set({ candidates: state.candidates, manual: state.manual });
+    render();
+    return;
+  }
+
   const code = e.target.dataset.drop;
   if (!code) return;
-  if (!confirm(`'${code}' 를 명단에서 뺄까요?\n\n앞으로 이 사람은 자동 재차단되지 않습니다.`)) return;
+  const m = state.manual.find((x) => x.code === code);
+  // 이 버튼은 명단과 이 기록을 한꺼번에 지운다. 지우면 누구였는지 확인할 길이 없다.
+  // 2026-09-13 파딱 갤에서 실제로 그랬다. 지우기 전에 그 사실을 알린다.
+  if (!confirm(
+    `'${(m && m.label) || code}' 를 명단에서 뺄까요?\n\n` +
+    `앞으로 이 사람은 자동 재차단되지 않습니다.\n` +
+    `이 목록에서도 사라져서 나중에 누구였는지 확인할 수 없습니다. ` +
+    `(작업 기록에는 남아 있습니다)`
+  )) return;
 
   state.watchlist = state.watchlist.filter((t) => t.value !== code);
   state.manual = state.manual.filter((m) => m.code !== code);
