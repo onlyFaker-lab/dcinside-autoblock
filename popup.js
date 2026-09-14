@@ -91,6 +91,7 @@ function render() {
   $("nextCheck").textContent = nextCheckText();
   const busy = isBusy(state.status);
   $("btnCheck").disabled = busy;
+  $("btnCheckNow").disabled = busy;
   $("btnApply").disabled = busy || state.candidates.length === 0;
 
   // 후보
@@ -111,6 +112,26 @@ function render() {
   $("candStart").classList.toggle("hidden", state.watchlist.length > 0);
 
   // 완장이 직접 풀어준 대상
+  // 확인해야 할 만료 예정자. 저장된 기록만으로 세므로 로그인이 풀려 있어도 뜬다.
+  // 규칙은 dc.js 의 dueTargets 한 곳에만 있다. 여기 옮겨 적으면 화면 숫자와
+  // 실제 조회 대상이 어긋난다 (v1.7.4 에서 실제로 그랬다).
+  //
+  // 조회가 실패했다는 사실이 작업 기록에만 남아서 놓치기 쉽다는 파딱 지적(2026-09-14).
+  // 후보가 이미 떠 있으면 할 일이 이미 보이는 상태이므로 굳이 또 알리지 않는다.
+  const due = dueTargets(state.watchlist, Date.now());
+  const showDue = due.length > 0 && state.candidates.length === 0 && !state.status.busy;
+  $("dueBox").classList.toggle("hidden", !showDue);
+  if (showDue) {
+    const 처음 = due.filter((t) => !t.nextCheckAt).length;
+    const 만료 = due.length - 처음;
+    $("dueText").textContent = `확인해야 할 사람 ${due.length}명`;
+    $("dueWhy").textContent =
+      (만료 ? `만료 예정 시각이 지난 사람 ${만료}명` : "") +
+      (만료 && 처음 ? ", " : "") +
+      (처음 ? `아직 한 번도 확인하지 못한 사람 ${처음}명` : "") +
+      ". 디시에 로그인하신 뒤 눌러주세요.";
+  }
+
   $("manualBox").classList.toggle("hidden", state.manual.length === 0);
   $("manualBody").innerHTML = state.manual.map((m) => `
     <tr>
@@ -312,6 +333,12 @@ document.querySelectorAll(".seg").forEach((btn) => {
     btn.classList.add("on");
     $(`tab-${btn.dataset.seg}`).classList.add("on");
   });
+});
+
+// 할 일 탭의 알림에 붙은 버튼. 설정 탭의 '지금 확인'과 같은 일을 한다.
+// 확인하러 탭을 옮겨 다니지 않게 하려고 눈에 띄는 자리에 하나 더 뒀다.
+$("btnCheckNow").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "check" });
 });
 
 $("btnCheck").addEventListener("click", () => {
@@ -534,7 +561,7 @@ const REASONS = ["음란성", "광고", "욕설", "도배", "혐오 콘텐츠", 
 const REASON_TXT_MAX = 20;
 
 // dc.js의 합치기 규칙을 그대로 쓴다. 여기 옮겨 적으면 규칙이 두 벌이 된다.
-import { mergeGallog } from "./dc.js";
+import { mergeGallog, dueTargets } from "./dc.js";
 const CUSTOM_PICK = "__custom__";
 
 // 사유 칸 하나를 묶어서 다룬다. 드롭다운에서 '직접 입력'을 고르면 텍스트 칸이

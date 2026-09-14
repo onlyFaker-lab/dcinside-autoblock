@@ -6,7 +6,7 @@
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
   collectActivity, checkGallog, pickGallogTargets,
-  isBusy, localDateKey, jitter, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FETCH_SECS,
+  isBusy, localDateKey, jitter, dueTargets, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FETCH_SECS,
   GALLOG_FAIL_STREAK,
   rowHealth, carryOver,
 } from "./dc.js";
@@ -164,9 +164,8 @@ async function runCheck({ auto = false } = {}) {
   // 31일 차단 중인 사람은 만료 전까지 상태가 안 바뀐다. 그때까지 조회하지 않는다.
   // 명단이 수만 명이 되면 이 판단이 전부다. 하루에 실제로 볼 사람은
   // 그날 만료되는 몇백 명뿐이 된다.
-  const due = enabled
-    .filter((t) => !t.nextCheckAt || now >= t.nextCheckAt)
-    .sort((a, b) => (a.nextCheckAt || 0) - (b.nextCheckAt || 0));
+  // 규칙은 dc.js 에 한 벌만 둔다. 팝업도 같은 함수로 숫자를 낸다.
+  const due = dueTargets(enabled, now);
 
   const cap = Math.max(1, Number(settings.maxChecksPerRun) || 300);
 

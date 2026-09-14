@@ -106,6 +106,25 @@ export function reasonFields(reason) {
   return { value: CUSTOM_REASON, txt, custom: true, cut: txt !== text };
 }
 
+// 지금 조회해야 할 사람을 고른다. 만료 예정 시각이 지났거나 아직 모르는 사람이다.
+//
+// ⚠ 이 규칙은 여기 한 곳에만 있어야 한다. background 는 조회할 대상을 고르는 데
+// 쓰고, popup 은 "확인해야 할 사람이 몇 명인지"를 보여주는 데 쓴다. 양쪽에 따로
+// 적으면 한쪽만 고쳤을 때 화면 숫자와 실제 조회 대상이 어긋난다.
+// v1.7.4 에서 실제로 그랬다 — 고르는 쪽은 nextCheckAt 0 을 대상으로 쳤는데
+// 세는 쪽만 걸러내서, 명단 4575명이 전원 0인 갤에서 '0명'이라고 표시했다.
+//
+// nextCheckAt 이 없거나 0 이면 '아직 한 번도 못 봤다'는 뜻이라 지금 봐야 한다.
+// 이 판단은 디시에 묻지 않고 저장된 기록만으로 내린다. 그래서 로그인이 풀려
+// 있어도 "확인해야 할 사람이 몇 명 있다"까지는 알려줄 수 있다.
+export function dueTargets(watchlist, now = Date.now()) {
+  const t = typeof now === "number" ? now : now.getTime();
+  return (watchlist || [])
+    .filter((x) => x && x.enabled !== false)
+    .filter((x) => !x.nextCheckAt || t >= x.nextCheckAt)
+    .sort((a, b) => (a.nextCheckAt || 0) - (b.nextCheckAt || 0));
+}
+
 // 갤로그 점검을 누가 받을지 고른다. background.js 안에 두면 테스트가 규칙을
 // 베껴 적게 되고, 그러면 실제 코드가 바뀌어도 검사가 통과해버린다.
 //

@@ -60,6 +60,18 @@
       </table>
     </div>
 
+    <!-- 확인해야 할 만료 예정자 알림.
+         정해진 시각에 로그인이 안 돼 있으면 조회가 실패하는데, 그 사실이
+         작업 기록에만 남아서 놓치기 쉽다는 파딱 지적(2026-09-14).
+         저장된 만료 예정 시각만으로 세므로 로그인 여부와 상관없이 뜬다. -->
+    <div id="dueBox" class="duebox hidden">
+      <div class="addrow">
+        <b id="dueText"></b>
+        <button id="btnCheckNow" class="primary">지금 확인</button>
+      </div>
+      <p class="muted small" id="dueWhy"></p>
+    </div>
+
     <div class="quickbox">
       <div class="addrow">
         <button id="btnQuickScan" class="primary">밀린 31일 차단 불러오기</button>

@@ -363,3 +363,19 @@ input[type=checkbox].sw:focus-visible { outline: 2px solid var(--accent-hover); 
 }
 .quickbox .addrow { margin-bottom: 6px; }
 .quickbox p:last-child { margin-bottom: 0; }
+
+
+/* 확인해야 할 만료 예정자 알림.
+   작업 기록에만 남으면 놓친다는 파딱 지적(2026-09-14)으로 넣었다.
+   경고가 아니라 할 일이므로 빨강은 피하고, 다른 상자들과 확실히 구분되게 한다. */
+.duebox {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid #b98b2e;
+  border-left: 4px solid #e0a52a;
+  border-radius: 6px;
+  background: rgba(224, 165, 42, 0.10);
+}
+.duebox b { color: #e0a52a; }
+.duebox .addrow { align-items: center; }
+.duebox p { margin: 6px 0 0; }

@@ -643,5 +643,61 @@ console.log("\n[직접 풀어준 사람 명단에서 빼기]");
   ok("확인하면 빠진다", !(stored.watchlist || []).some((t) => t.value === "bbb2222"));
 }
 
+// ── 확인해야 할 사람 알림 ──────────────────────────────────
+// 정해진 시각에 로그인이 안 돼 있으면 조회가 실패하는데, 그 사실이 작업 기록에만
+// 남아서 놓치기 쉽다는 파딱 지적(2026-09-14). 저장된 만료 예정 시각만으로 세므로
+// 디시에 묻지 않고도 띄울 수 있다.
+console.log("\n[확인해야 할 사람 알림]");
+{
+  const 과거 = Date.now() - 3600 * 1000;
+  const 미래 = Date.now() + 30 * 24 * 3600 * 1000;
+
+  await seed({
+    watchlist: [
+      { kind: "code", value: "aaa1111", enabled: true, nextCheckAt: 과거 },   // 만료됨
+      { kind: "code", value: "bbb2222", enabled: true, nextCheckAt: 0 },      // 한 번도 못 봄
+      { kind: "code", value: "ccc3333", enabled: true, nextCheckAt: 미래 },   // 아직 멀었음
+      { kind: "code", value: "ddd4444", enabled: false, nextCheckAt: 과거 },  // 꺼둔 사람
+    ],
+    candidates: [],
+  });
+
+  ok("알림이 보인다", !els.get("dueBox").classList.contains("hidden"));
+  ok("만료된 사람과 못 본 사람만 센다", /2명/.test(els.get("dueText").textContent),
+     els.get("dueText").textContent);
+  ok("갈래를 나눠 설명한다",
+     /만료 예정 시각이 지난 사람 1명/.test(els.get("dueWhy").textContent) &&
+     /한 번도 확인하지 못한 사람 1명/.test(els.get("dueWhy").textContent),
+     els.get("dueWhy").textContent);
+  ok("로그인하라고 말한다", /로그인/.test(els.get("dueWhy").textContent));
+
+  // 버튼이 실제로 확인을 시작해야 한다.
+  sent.length = 0;
+  els.get("btnCheckNow").dispatchEvent({ type: "click", target: els.get("btnCheckNow") });
+  await new Promise((r) => setTimeout(r, 0));
+  ok("버튼이 확인을 시작한다", sent.some((m) => m && m.type === "check"), JSON.stringify(sent));
+}
+
+// 후보가 이미 떠 있으면 할 일이 보이는 상태다. 굳이 또 알리지 않는다.
+console.log("\n[후보가 있으면 알림을 겹쳐 띄우지 않는다]");
+{
+  await seed({
+    watchlist: [{ kind: "code", value: "aaa1111", enabled: true, nextCheckAt: 0 }],
+    candidates: [{ code: "zzz9999", label: "ㅇㅇ (zzz9999)", reason: "음란성" }],
+  });
+  ok("알림이 숨는다", els.get("dueBox").classList.contains("hidden"));
+}
+
+// 볼 사람이 없으면 뜨지 않는다.
+console.log("\n[확인할 사람이 없으면 알림 없음]");
+{
+  await seed({
+    watchlist: [{ kind: "code", value: "aaa1111", enabled: true,
+                  nextCheckAt: Date.now() + 30 * 24 * 3600 * 1000 }],
+    candidates: [],
+  });
+  ok("알림이 숨는다", els.get("dueBox").classList.contains("hidden"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
