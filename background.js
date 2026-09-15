@@ -917,6 +917,20 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "gallogNext") {
+    const { gallogAuto, status, settings } = await chrome.storage.local.get(
+      ["gallogAuto", "status", "settings"]);
+    if (!gallogAuto) return;                       // 꺼졌거나 이미 끝났다
+    if (settings && settings.gallogAutoOn === false) { await stopGallogAuto(""); return; }
+    if (isBusy(status)) {
+      // 다른 작업이 도는 중이다. 겹치면 요청이 두 배가 된다. 뒤로 미룬다.
+      await chrome.alarms.create("gallogNext", { when: Date.now() + 5 * 60 * 1000 });
+      return;
+    }
+    await log("자동 이어돌기: 다음 묶음을 봅니다.");
+    await runGallog(gallogAuto.limit, gallogAuto.months);
+    return;
+  }
   if (alarm.name !== "tick") return;
 
   const { settings, status, ranToday } = await getState();
@@ -1048,6 +1062,50 @@ async function runActivity(months = 3, maxPages = 2000) {
 //   1. 간격을 1200ms로 늘리고 난수로 흔든다 (일정한 간격 자체가 신호다)
 //   2. 기본 인원을 50명으로 줄인다. 오래된 사람부터 도니 며칠에 걸쳐 다 돈다
 //   3. 연속으로 실패하면 즉시 멈춘다. 이미 막힌 뒤에 계속 두드리지 않는다
+// ── 갤로그 점검 자동 이어돌기 ────────────────────────────────
+// 파딱 요청(2026-09-17): 4,700명이면 16번, 명단이 커지면 20번 넘게 눌러야 한다.
+// 켜둔 채로 두면 알아서 다음 묶음을 도는 게 낫다.
+//
+// ⚠ 사람이 조급해서 16번을 연달아 누르는 것보다 이쪽이 오히려 안전하다.
+//    다만 조건이 있다. 간격이 길어야 하고, 조금이라도 이상하면 멈춰야 한다.
+//
+// 간격을 랜덤으로 두는 이유: 늘 같은 간격으로 요청이 오면 기계로 보인다.
+const GALLOG_AUTO_MIN_MS = 20 * 60 * 1000;   // 20분
+const GALLOG_AUTO_MAX_MS = 40 * 60 * 1000;   // 40분
+
+function autoGapMs() {
+  return GALLOG_AUTO_MIN_MS +
+    Math.floor(Math.random() * (GALLOG_AUTO_MAX_MS - GALLOG_AUTO_MIN_MS));
+}
+
+async function stopGallogAuto(why) {
+  await chrome.alarms.clear("gallogNext");
+  const { gallogAuto } = await chrome.storage.local.get("gallogAuto");
+  if (gallogAuto) await chrome.storage.local.set({ gallogAuto: null });
+  if (why) await log(`  [안내] 자동 이어돌기를 멈췄습니다. ${why}`);
+}
+
+async function scheduleGallogAuto(limit, months) {
+  const gap = autoGapMs();
+  const when = Date.now() + gap;
+  await chrome.storage.local.set({ gallogAuto: { limit, months, when } });
+  await chrome.alarms.create("gallogNext", { when });
+  const 분 = Math.round(gap / 60000);
+  await log(`  ${분}분 뒤에 다음 ${limit}명을 자동으로 이어서 봅니다.`);
+  await log(`  브라우저를 켜두시면 됩니다. 꺼지면 다시 켤 때 이어집니다.`);
+}
+
+// 한 바퀴가 끝났다. 15번째쯤부터 작업 기록을 뒤지지 않아도 알 수 있게 크게 알린다.
+async function announceGallogDone(reason) {
+  await log("");
+  await log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  await log("  ✅ 전체 점검이 끝났습니다. 더 보실 것 없습니다.");
+  if (reason) await log(`     ${reason}`);
+  await log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  await chrome.storage.local.set({ gallogDoneAt: Date.now() });
+  notify("갤로그 전체 점검 완료", "더 확인할 사람이 없습니다. 이제 안 누르셔도 됩니다.");
+}
+
 async function runGallog(limit = 50, months = 0, onlyCodes = null) {
   const { watchlist, status } = await getState();
 
@@ -1082,7 +1140,12 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
     await log(
       "갤로그를 확인할 대상이 없습니다." + (why.length ? ` ${why.join(". ")}.` : "")
     );
-    return { ok: true, checked: 0 };
+    await stopGallogAuto("");
+    await announceGallogDone(
+      why.length ? why.join(". ") + "." : "명단의 모든 사람을 확인했습니다."
+    );
+    await setStatus("대기 중", false);
+    return { ok: true, checked: 0, done: true };
   }
 
   // 인원이 적으면 몇 초다. Math.ceil로 분만 쓰면 2명짜리도 '1분'이 되어
@@ -1280,8 +1343,22 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
     }
     // 이번에 못 본 사람. tooSoon은 '아직 볼 필요가 없는' 사람이라 빼고 센다.
     const left = targets.length - done + waiting;
-    if (left > 0) {
-      await log(`  아직 ${left}명이 남았습니다. 다음에 다시 누르면 이어서 봅니다.`);
+    const { settings: nowSettings } = await getState();
+    const 자동켬 = nowSettings.gallogAutoOn !== false;
+
+    if (aborted) {
+      // ⚠ 중단은 대개 IP 차단이다. 자동으로 또 두드리면 상황을 악화시킨다.
+      await stopGallogAuto("이상이 있어 멈췄습니다. 원인을 확인한 뒤 직접 눌러주세요.");
+    } else if (left > 0) {
+      if (자동켬) {
+        await log(`  아직 ${left}명이 남았습니다.`);
+        await scheduleGallogAuto(targets.length, months);
+      } else {
+        await log(`  아직 ${left}명이 남았습니다. 다음에 다시 누르면 이어서 봅니다.`);
+      }
+    } else {
+      await stopGallogAuto("");
+      await announceGallogDone("명단의 모든 사람을 확인했습니다.");
     }
     await setStatus(aborted ? "갤로그 점검 중단됨" : "대기 중", false);
     if (tally.deleted) {
@@ -1312,7 +1389,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       else if (msg.type === "scan") sendResponse(await runScan(msg.pages, msg.until, msg.includeReleased));
       else if (msg.type === "recheckAll") sendResponse(await runRecheckAll());
       else if (msg.type === "activity") sendResponse(await runActivity(msg.months, msg.pages));
-      else if (msg.type === "gallog") sendResponse(await runGallog(msg.limit, msg.months, msg.codes));
+      else if (msg.type === "gallog") {
+        // 사람이 직접 눌렀다. 예약된 자동 묶음과 겹치지 않게 지운다.
+        await chrome.alarms.clear("gallogNext");
+        sendResponse(await runGallog(msg.limit, msg.months, msg.codes));
+      }
       else sendResponse({ ok: false, error: "알 수 없는 요청" });
     } catch (e) {
       await log(`[오류] ${e.message}`);

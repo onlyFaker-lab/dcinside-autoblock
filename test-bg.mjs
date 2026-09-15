@@ -131,6 +131,8 @@ const fakeFetch = async (url, opts = {}) => {
 let stored = {};
 let msgListener = null;
 const alarms = [];
+const cleared = [];
+let alarmHandler = null;
 const chrome = {
   storage: {
     local: {
@@ -149,7 +151,11 @@ const chrome = {
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { msgListener = fn; } },
   },
-  alarms: { create(...a) { alarms.push(a); }, onAlarm: { addListener() {} } },
+  alarms: {
+    create(...a) { alarms.push(a); },
+    async clear(name) { cleared.push(name); return true; },
+    onAlarm: { addListener(fn) { alarmHandler = fn; } },
+  },
   notifications: { create() {} },
   cookies: { async get() { return { value: "fake-ci-token" }; } },
 };
@@ -791,6 +797,70 @@ console.log("\n[26] 게시글 비공개 계정");
   eq("비공개로 기록한다", t.gallogPostsOpen, false);
   ok("날짜는 모르는 채로 둔다", t.gallogPostAt === undefined);
   ok("마지막 활동도 모른다", t.gallogLastAt === undefined);
+}
+
+// ── [27] 자동 이어돌기 ──────────────────────────────────────
+// 파딱 요청(2026-09-17): 4,700명이면 16번, 명단이 커지면 20번 넘게 눌러야 한다.
+// ⚠ 사람이 조급해서 연달아 누르는 것보다 이쪽이 안전하다. 다만 간격이 길어야 하고,
+//    이상이 있으면 멈춰야 한다. 그 두 가지를 여기서 지킨다.
+console.log("\n[27] 갤로그 자동 이어돌기");
+{
+  const 판깔기 = (명단) => {
+    world.clear(); requests = []; deleted.clear(); gallogState.clear();
+    intervals.length = 0; alarms.length = 0; cleared.length = 0;
+    stored = {
+      settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                  maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+      watchlist: 명단, candidates: [], manual: [], imports: [], history: [], logs: [],
+      status: { text: "대기 중", busy: false, busySince: 0 },
+    };
+  };
+  const 사람 = (v) => ({ kind: "code", value: v, reason: "음란성", enabled: true, nextCheckAt: 0 });
+
+  // 한 묶음(1명)만 보고, 남은 사람이 있으면 다음을 예약한다.
+  판깔기([사람("auto0001"), 사람("auto0002"), 사람("auto0003")]);
+  for (const c of ["auto0001", "auto0002", "auto0003"]) gallogState.set(c, { posts: 1, comments: 1 });
+  await send({ type: "gallog", limit: 1, months: 0 });
+
+  const 기록 = () => stored.logs.map((l) => l.message || "").join("\n");
+  ok("남았으면 다음을 예약한다", alarms.some((a) => a[0] === "gallogNext"), JSON.stringify(alarms));
+  ok("몇 분 뒤인지 알려준다", /분 뒤에 다음 .*명을 자동으로/.test(기록()), 기록());
+
+  const 예약 = alarms.find((a) => a[0] === "gallogNext");
+  const 간격 = 예약[1].when - Date.now();
+  // ⚠ 간격이 짧아지면 IP 차단 위험이 커진다. 20~40분 밖으로 나가면 안 된다.
+  ok("간격이 20분 이상", 간격 >= 19.5 * 60 * 1000, String(Math.round(간격 / 60000)));
+  ok("간격이 40분 이하", 간격 <= 40 * 60 * 1000, String(Math.round(간격 / 60000)));
+  ok("무엇을 이어볼지 적어둔다", stored.gallogAuto && stored.gallogAuto.limit === 1,
+     JSON.stringify(stored.gallogAuto));
+
+  // 다 봤으면 예약하지 않고 끝났다고 크게 알린다.
+  판깔기([사람("done0001")]);
+  gallogState.set("done0001", { posts: 1, comments: 1 });
+  await send({ type: "gallog", limit: 10, months: 0 });
+  ok("다 봤으면 예약 안 한다", !alarms.some((a) => a[0] === "gallogNext"), JSON.stringify(alarms));
+  ok("끝났다고 크게 알린다", /전체 점검이 끝났습니다/.test(기록()), 기록().slice(-400));
+
+  // 대상이 아예 없을 때도 끝났다고 알린다 (15번째쯤 작업 기록을 뒤지지 않게).
+  판깔기([{ ...사람("fresh001"), gallogCheckedAt: Date.now() }]);
+  await send({ type: "gallog", limit: 10, months: 0 });
+  ok("볼 사람이 없어도 끝났다고 알린다", /전체 점검이 끝났습니다/.test(기록()), 기록().slice(-300));
+
+  // ⚠ 중단(대개 IP 차단)이면 자동으로 또 두드리면 안 된다.
+  판깔기([사람("ban00001"), 사람("ban00002"), 사람("ban00003"),
+          사람("ban00004"), 사람("ban00005"), 사람("ban00006"),
+          사람("ban00007"), 사람("ban00008")]);
+  for (let i = 1; i <= 8; i++) gallogState.set(`ban0000${i}`, { broken: true });
+  await send({ type: "gallog", limit: 8, months: 0 });
+  ok("중단되면 예약하지 않는다", !alarms.some((a) => a[0] === "gallogNext"),
+     JSON.stringify(alarms));
+  ok("멈췄다고 알려준다", /자동 이어돌기를 멈췄습니다/.test(기록()), 기록().slice(-400));
+
+  // 사람이 직접 누르면 예약된 것을 지운다. 겹치면 요청이 두 배가 된다.
+  판깔기([사람("hand0001"), 사람("hand0002")]);
+  for (const c of ["hand0001", "hand0002"]) gallogState.set(c, { posts: 1, comments: 1 });
+  await send({ type: "gallog", limit: 1, months: 0 });
+  ok("직접 누르면 예약을 지우고 시작한다", cleared.includes("gallogNext"), cleared.join(","));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

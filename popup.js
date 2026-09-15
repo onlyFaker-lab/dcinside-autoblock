@@ -36,6 +36,7 @@ async function load() {
     history: s.history || [],
     logs: s.logs || [],
     status: s.status || { text: "대기 중", busy: false, busySince: 0 },
+    gallogDoneAt: s.gallogDoneAt || 0,
     lastScanAt: s.lastScanAt || 0,
     candidatesAt: s.candidatesAt || 0,
   };
@@ -109,6 +110,19 @@ function render() {
   renderQuickScan();
   $("statusText").textContent = state.status.text;
   $("nextCheck").textContent = nextCheckText();
+  // 명단이 비어 있으면 알린다. 처음 켠 것과 잃어버린 것을 구분할 방법이 없으니
+  // 문구가 둘 다에 말이 되어야 한다.
+  $("emptyWarn").classList.toggle("hidden", state.watchlist.length > 0);
+
+  // 한 바퀴 끝. 확인을 누를 때까지 남는다.
+  const done = state.gallogDoneAt || 0;
+  $("doneBox").classList.toggle("hidden", !done);
+  if (done) {
+    $("doneWhen").textContent =
+      `${new Date(done).toLocaleString("sv-SE").slice(0, 16)} 기준. ` +
+      `더 확인할 사람이 없습니다. 이제 안 누르셔도 됩니다.`;
+  }
+
   const busy = isBusy(state.status);
 
   // ⚠ 작업이 도는 중에 다른 버튼을 누르면 뒤에 누른 쪽은 조용히 거절된다.
@@ -375,6 +389,7 @@ function render() {
   $("cfgAuto").checked = !!state.settings.autoApply;
   $("cfgRecheck").checked = !!state.settings.recheckBeforeApply;
   $("cfgNotify").checked = state.settings.notify !== false;
+  $("cfgGallogAuto").checked = state.settings.gallogAutoOn !== false;
 }
 
 // --------------------------------------------------------------- 이벤트
@@ -542,6 +557,7 @@ $("btnSave").addEventListener("click", async () => {
     autoApply: $("cfgAuto").checked,
     recheckBeforeApply: $("cfgRecheck").checked,
     notify: $("cfgNotify").checked,
+    gallogAutoOn: $("cfgGallogAuto").checked,
   };
   await chrome.storage.local.set({ settings: state.settings });
   $("saved").textContent = "저장했습니다.";
@@ -1002,12 +1018,29 @@ function parseBulk(text) {
   for (const raw of text.split(/[\r\n]+/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    // 한 줄에 닉네임과 사유가 같이 붙어 있을 수 있다.
-    // 코드처럼 생긴 첫 낱말을 쓴다.
-    const code = (line.match(/[A-Za-z0-9_-]+/g) || []).find((t) => RE_CODE_LIKE.test(t));
-    if (!code || seen.has(code)) continue;
-    seen.add(code);
-    out.push(code);
+
+    const words = line.match(/[A-Za-z0-9_-]+/g) || [];
+    const codes = words.filter((t) => RE_CODE_LIKE.test(t));
+    if (!codes.length) continue;
+
+    // 줄 전체가 코드로만 이뤄져 있으면 가로로 늘어놓은 것이다. 전부 쓴다.
+    // (엑셀 한 행, 채팅에 적힌 목록, 스페이스로 늘어놓은 코드)
+    // 2026-09-17: 7명을 한 줄로 붙여넣었더니 '1명 인식됨'이 떴다.
+    //
+    // ⚠ 섞여 있으면 첫 것만 쓴다. 차단 목록 한 줄에는 닉네임과 사유가 같이 있고,
+    //    닉네임이 코드처럼 생긴 경우(abc123)가 있어서 전부 집으면 엉뚱한 것이 들어온다.
+    //
+    // ⚠ 낱말만 세면 안 된다. 정규식이 영문·숫자만 잡아서 한글은 아예 안 보인다.
+    //    "ㅇㅇ (capture6180) 음란성 dummy123" 이 코드만 있는 줄로 보인다.
+    //    낱말을 지우고 남는 것이 있는지로 판단한다.
+    const 나머지 = line.replace(/[A-Za-z0-9_-]+/g, " ").replace(/[\s,]+/g, "");
+    const 코드만 = !나머지 && codes.length === words.length;
+    const 쓸것 = 코드만 ? codes : [codes[0]];
+    for (const code of 쓸것) {
+      if (seen.has(code)) continue;
+      seen.add(code);
+      out.push(code);
+    }
   }
   return out;
 }
@@ -1436,6 +1469,12 @@ $("btnQuickScan").addEventListener("click", () => {
   // 결과는 채우기 화면에 쌓이므로 미리 그쪽으로 옮겨둔다.
   document.querySelector('.tab[data-tab="mgmt"]').click();
   document.querySelector('.seg[data-seg="scan"]').click();
+});
+
+$("btnDoneOk").addEventListener("click", async () => {
+  state.gallogDoneAt = 0;
+  await chrome.storage.local.set({ gallogDoneAt: 0 });
+  render();
 });
 
 $("cleanLimit").addEventListener("input", render);

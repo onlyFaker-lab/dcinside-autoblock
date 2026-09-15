@@ -969,5 +969,86 @@ console.log("\n[명단 일괄 삭제]");
   ok("전체면 전체라고 말한다", /명단 전체/.test(confirmTexts.at(-1) || ""), confirmTexts.at(-1));
 }
 
+// ── 붙여넣기: 가로로 늘어놓아도 받는다 ──────────────────────
+// 2026-09-17: 코드 7개를 한 줄로 붙여넣었더니 "1명 인식됨"이 떴다.
+// 갤 목록을 그대로 붙이는 걸 상정한 기능인데, 실제로는 엑셀 한 행이나
+// 채팅에 적힌 목록도 붙여넣는다.
+console.log("\n[붙여넣기 가로 목록]");
+{
+  await seed({ watchlist: [], status: { text: "대기 중", busy: false, busySince: 0 } });
+  const 넣기 = (t) => {
+    els.get("bulkText").value = t;
+    els.get("bulkText").dispatchEvent({ type: "input" });
+    return els.get("bulkCount").textContent;
+  };
+
+  ok("스페이스로 늘어놓아도 다 잡는다",
+     /7명/.test(넣기("capture6180 chip3298 read7286 debate3002 leaf4517 apple8748 zzzz9999")),
+     넣기("capture6180 chip3298 read7286 debate3002 leaf4517 apple8748 zzzz9999"));
+
+  ok("쉼표로 늘어놓아도 잡는다", /3명/.test(넣기("aaa1111, bbb2222, ccc3333")));
+  ok("줄바꿈은 그대로 된다", /3명/.test(넣기("aaa1111\nbbb2222\nccc3333")));
+  ok("같은 코드는 한 번만", /2명/.test(넣기("aaa1111 bbb2222 aaa1111")));
+
+  // ⚠ 닉네임과 사유가 섞인 줄에서는 첫 코드만 쓴다. 닉네임이 코드처럼 생긴
+  //    경우(abc123)가 있어서 전부 집으면 엉뚱한 사람이 명단에 들어온다.
+  ok("섞인 줄은 첫 코드만", /1명/.test(넣기("ㅇㅇ (capture6180) 음란성 dummy123")),
+     넣기("ㅇㅇ (capture6180) 음란성 dummy123"));
+  ok("# 로 시작하는 줄은 무시", /2명/.test(넣기("# 메모\naaa1111 bbb2222")));
+}
+
+// ── 명단이 비어 있으면 알린다 ───────────────────────────────
+// 2026-09-17 주딱이 확장을 새 폴더에 풀어 명단·이력·설정을 통째로 잃었다.
+// ⚠ 처음 켠 것인지 잃은 것인지 확장은 구분할 수 없다. 문구가 둘 다에 맞아야 한다.
+console.log("\n[빈 명단 경고]");
+{
+  await seed({ watchlist: [], status: { text: "대기 중", busy: false, busySince: 0 } });
+  ok("비면 경고가 보인다", !els.get("emptyWarn").classList.contains("hidden"));
+
+  await seed({
+    watchlist: [{ kind: "code", value: "aaa1111", reason: "음란성", enabled: true }],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  });
+  ok("있으면 안 보인다", els.get("emptyWarn").classList.contains("hidden"));
+}
+
+// ── 전체 점검 완료 표시 ─────────────────────────────────────
+// 파딱(2026-09-17): 15번째쯤부터 다 끝났는지 작업 기록을 보는 게 번거롭다.
+console.log("\n[전체 점검 완료 표시]");
+{
+  await seed({
+    watchlist: [{ kind: "code", value: "aaa1111", reason: "음란성", enabled: true }],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+    gallogDoneAt: Date.now(),
+  });
+  ok("끝났으면 크게 보인다", !els.get("doneBox").classList.contains("hidden"));
+  ok("안 눌러도 된다고 적는다", /안 누르셔도/.test(els.get("doneWhen").textContent),
+     els.get("doneWhen").textContent);
+
+  els.get("btnDoneOk").click();
+  await new Promise((r) => setTimeout(r, 0));
+  ok("확인을 누르면 사라진다", els.get("doneBox").classList.contains("hidden"));
+  ok("눌렀다는 것이 남는다", stored.gallogDoneAt === 0, String(stored.gallogDoneAt));
+
+  await seed({
+    watchlist: [{ kind: "code", value: "aaa1111", reason: "음란성", enabled: true }],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+    gallogDoneAt: 0,
+  });
+  ok("안 끝났으면 안 보인다", els.get("doneBox").classList.contains("hidden"));
+}
+
+// ── 자동 이어돌기 설정 ──────────────────────────────────────
+console.log("\n[자동 이어돌기 설정]");
+{
+  await seed({ watchlist: [], settings: { galleryId: "g", checkTimes: ["09:30"] },
+               status: { text: "대기 중", busy: false, busySince: 0 } });
+  ok("기본은 켬", els.get("cfgGallogAuto").checked === true);
+
+  await seed({ watchlist: [], settings: { galleryId: "g", checkTimes: ["09:30"], gallogAutoOn: false },
+               status: { text: "대기 중", busy: false, busySince: 0 } });
+  ok("끄면 꺼진 채로 보인다", els.get("cfgGallogAuto").checked === false);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
