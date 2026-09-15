@@ -268,8 +268,10 @@ function render() {
 
   // ⚠ 한 번 누르면 이 인원만 보고 끝난다. 파딱이 '여러 번 자동으로 돈다'고
   //    이해했다(2026-09-17). 버튼 이름에 숫자를 박아두면 오해가 줄어든다.
-  const 인원 = Number($("cleanLimit").value) || 0;
-  $("btnGallog").textContent = 인원 ? `갤로그 ${인원}명 점검` : "갤로그 점검";
+  // ⚠ 버튼 글자와 실제로 보는 인원은 반드시 같은 값이어야 한다. 갈라지면
+  //    '갤로그 5명 점검'을 눌렀는데 확인창이 10명이라고 한다(2026-09-17 실제).
+  $("btnGallog").textContent = gallogPlan()
+    ? `갤로그 ${gallogPlan()}명 점검` : "갤로그 점검";
 
   // 명단 채우기
   // ── 명단 정리 탭 ──
@@ -1240,6 +1242,22 @@ function gallogActivity(t) {
 
 // "2026.09.15" 가 며칠 전인지. 형식이 다르면 null 이다.
 // ⚠ 문자열끼리 비교하지 말 것. 날짜로 바꿔서 센다.
+// 한 번에 볼 인원. 버튼 글자와 실제 요청이 이 하나를 같이 쓴다.
+// 하한은 1이다. 적게 보는 것은 요청을 줄이는 방향이라 막을 이유가 없다.
+// (예전에는 하한이 10이라 5를 넣어도 10을 봤다)
+function gallogLimit() {
+  return Math.max(1, Math.min(500, Number($("cleanLimit").value) || 50));
+}
+
+// 실제로 보게 될 인원. 명단이 상한보다 적으면 그만큼만 본다.
+// 버튼 글자, 예상 시간, 확인창이 전부 이 값을 쓴다.
+function gallogPlan() {
+  const pool = state.watchlist.filter(
+    (t) => t.kind === "code" && t.gallogState !== "deleted"
+  ).length;
+  return Math.min(gallogLimit(), pool);
+}
+
 function daysSinceGallogDate(s) {
   const m = /^(\d{4})\.(\d{2})\.(\d{2})$/.exec(String(s || ""));
   if (!m) return null;
@@ -1259,14 +1277,10 @@ $("btnActivity").addEventListener("click", () => {
 });
 
 $("btnGallog").addEventListener("click", () => {
-  const limit = Math.max(10, Math.min(500, Number($("cleanLimit").value) || 50));
+  const limit = gallogLimit();
   // 입력칸 값이 아니라 실제로 볼 인원으로 계산한다. 명단이 2명인데 상한이
   // 50이면 '1분'이라고 안내하고 3초 만에 끝난다(2026-09-08 실제).
-  // 이미 탈퇴로 확인된 사람은 다시 안 보므로 여기서도 뺀다.
-  const pool = state.watchlist.filter(
-    (t) => t.kind === "code" && t.gallogState !== "deleted"
-  ).length;
-  const n = Math.min(limit, pool);
+  const n = gallogPlan();
   if (!n) {
     alert("갤로그를 확인할 대상이 없습니다.\n\n명단에 식별 코드를 먼저 넣어주세요.");
     return;

@@ -913,7 +913,11 @@ console.log("\n[작업 중 버튼 잠금]");
 // 한 번 누르면 이 인원만 보고 끝난다. 여러 번 자동으로 도는 게 아니다.
 console.log("\n[갤로그 버튼에 인원 표시]");
 {
-  await seed({ watchlist: [], status: { text: "대기 중", busy: false, busySince: 0 } });
+  const 많은명단 = Array.from({ length: 400 }, (_, i) => ({
+    kind: "code", value: `pool${String(i).padStart(4, "0")}`,
+    reason: "음란성", enabled: true,
+  }));
+  await seed({ watchlist: 많은명단, status: { text: "대기 중", busy: false, busySince: 0 } });
   els.get("cleanLimit").value = "300";
   els.get("cleanLimit").dispatchEvent({ type: "input" });
   ok("300명이면 그렇게 적는다", /300명/.test(els.get("btnGallog").textContent),
@@ -922,6 +926,30 @@ console.log("\n[갤로그 버튼에 인원 표시]");
   els.get("cleanLimit").value = "50";
   els.get("cleanLimit").dispatchEvent({ type: "input" });
   ok("바꾸면 따라 바뀐다", /50명/.test(els.get("btnGallog").textContent),
+     els.get("btnGallog").textContent);
+
+  // ⚠ 버튼 글자와 실제로 보는 인원이 갈라지면 안 된다.
+  //    2026-09-17: 하한이 10이라 5를 넣으면 버튼은 '5명'인데 10명을 봤다.
+  els.get("cleanLimit").value = "5";
+  els.get("cleanLimit").dispatchEvent({ type: "input" });
+  ok("5명도 그대로 5명", /갤로그 5명 점검/.test(els.get("btnGallog").textContent),
+     els.get("btnGallog").textContent);
+
+  confirmAnswer = true;
+  els.get("btnGallog").click();
+  await new Promise((r) => setTimeout(r, 0));
+  const 보낸것 = sent.filter((m) => m.type === "gallog").at(-1);
+  ok("보낸 인원도 5명", 보낸것 && 보낸것.limit === 5, JSON.stringify(보낸것));
+  ok("확인창도 5명이라고 말한다", /5명/.test(confirmTexts.at(-1) || ""), confirmTexts.at(-1));
+
+  // 명단이 상한보다 적으면 그만큼만 본다. 버튼도 그 숫자를 말해야 한다.
+  await seed({
+    watchlist: 많은명단.slice(0, 7),
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  });
+  els.get("cleanLimit").value = "300";
+  els.get("cleanLimit").dispatchEvent({ type: "input" });
+  ok("명단이 적으면 그 인원만", /갤로그 7명 점검/.test(els.get("btnGallog").textContent),
      els.get("btnGallog").textContent);
 }
 
