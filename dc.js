@@ -1130,6 +1130,96 @@ const GALLOG_URL = "https://gallog.dcinside.com";
 const RE_GALLOG_COUNT =
   /class="[^"]*\btit\b[^"]*"[^>]*>\s*([^<]+?)\s*<span[^>]*class="[^"]*\bnum\b[^"]*"[^>]*>\s*\(([\d,]+)\)/gi;
 
+// 방문자 수. 2026-09-15 파딱이 보내준 실물 그대로:
+//
+//   <div class="visitors_num rbox">
+//     <span class="today_num">오늘의 방문자<em class="today_num">2/</em><em class="total_num ">200</em></span>
+//   </div>
+//
+// ⚠ class="total_num " 처럼 뒤에 공백이 붙어 있다. \bnum\b 같은 걸로 잡으려 하면
+//    같은 화면의 <span class="num">(590)</span> 과 헷갈린다. 클래스 이름을 통째로 본다.
+// ⚠ 오늘 숫자에는 뒤에 슬래시가 붙어 온다("2/"). 숫자만 떼어낸다.
+//
+// 총 방문자는 IP 단위로 하루 1씩만 오른다(파딱 확인). 그래서 확장이 한 번 보면
+// 그날 1이 오르고, 새로고침을 더 해도 안 오른다. 점검 주기가 몇 달이라
+// 우리가 보태는 건 점검 1회당 1이다. '변동 5 이상이면 활성' 같은 기준을 쓸 때
+// 이 1을 감안하면 된다.
+const RE_GALLOG_TOTAL = /class="total_num[^"]*"[^>]*>\s*([\d,]+)/i;
+const RE_GALLOG_TODAY = /class="today_num[^"]*"[^>]*>\s*([\d,]+)\s*\//i;
+
+export function parseGallogVisits(html) {
+  const t = RE_GALLOG_TOTAL.exec(html || "");
+  if (!t) return null;
+  const total = Number(t[1].replace(/,/g, ""));
+  if (!Number.isFinite(total)) return null;
+  const d = RE_GALLOG_TODAY.exec(html || "");
+  const today = d ? Number(d[1].replace(/,/g, "")) : null;
+  return { total, today: Number.isFinite(today) ? today : null };
+}
+
+// 방명록 최신 날짜. 매크로 방명록이 간헐적으로 찍히는 계정이 있어서, 글·댓글이
+// 그대로고 방문자도 안 늘었는데 방명록만 최근이면 클리너를 쓰는 활성 계정일 수
+// 있다는 파딱 제안(2026-09-15). 확정 근거가 아니라 참고 지표다.
+//
+// ⚠ <span class="date"> 는 갤로그 안에서 방명록 말고 게시글·댓글 목록에도 나온다.
+//    (이 갤로그는 게시글이 비공개라 안 보였을 뿐이다.)
+//    그래서 반드시 방명록 구역 안에서만 찾는다. 통째로 긁으면 게시글 날짜를
+//    방명록 날짜로 착각한다.
+const RE_GSTBOOK_DATE = /class="date"[^>]*>\s*([\d]{4}\.[\d]{2}\.[\d]{2})/g;
+
+export function parseGuestbookLatest(html) {
+  const body = html || "";
+  const i = body.indexOf("gallog_cont gstbook");
+  if (i < 0) return null;             // 방명록을 안 쓰는 계정
+  const end = body.indexOf("</section>", i);
+  const zone = body.slice(i, end < 0 ? body.length : end);
+  const dates = [...zone.matchAll(RE_GSTBOOK_DATE)].map((m) => m[1]);
+  if (!dates.length) return null;     // 방명록 칸은 있는데 글이 없음
+  return dates.sort().at(-1);         // "2026.09.15" 문자열 정렬이 곧 날짜순이다
+}
+
+// 방명록을 잠가둔 계정인지. 2026-09-15 파딱 지적:
+//
+//   "2월달에 등록된 방명록이 마지막이더라도, 2월 이후 방명록 작성 비허용해둬서
+//    새 방명록이 없는 경우도 있다"
+//
+// 그러면 '방명록이 오래됐다 = 비활성'이 틀린다. 잠가둔 것뿐일 수 있다.
+//
+// ⚠ 클래스 이름이 아니라 **화면에 보이는 문장**으로 찾는다. 비허용 계정의 HTML
+//    구조를 실물로 못 봤기 때문이다(캡처만 봤다). 문구는 캡처에 그대로 찍혀 있다.
+//    구조를 짐작하는 것보다 보이는 글자를 찾는 쪽이 덜 틀린다.
+// ⚠ 못 찾았다고 '허용'이라 단정하지 않는다. 갤로그 홈에는 이 문구가 아예
+//    안 나올 수도 있다. 모르면 모르는 채로 null 을 준다.
+const RE_GUEST_CLOSED = /허용된\s*사용자만\s*방명록/;
+
+export function parseGuestbookPolicy(html) {
+  return RE_GUEST_CLOSED.test(html || "") ? "closed" : null;
+}
+
+// 방명록 페이지를 따로 본다. 요청이 하나 더 나가므로 아무에게나 하면 안 된다.
+// 부르는 쪽에서 대상을 좁힌다(background 의 runGallog 참고).
+//
+// 돌려주는 값:
+//   "closed" 잠가둠 → 방명록이 오래된 게 비활성 근거가 못 된다
+//   "open"   열려 있음 → 그런데도 방명록이 없거나 오래됐으면 비활성 근거가 된다
+//   null     모름 → 판단에 쓰지 않는다
+export async function checkGuestbook(code) {
+  try {
+    const res = await fetch(`${GALLOG_URL}/${encodeURIComponent(code)}/guestbook`, {
+      credentials: "omit", redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const body = await res.text();
+    if (RE_GUEST_CLOSED.test(body)) return "closed";
+    // 방명록 화면이 맞는지 확인하고 나서야 '열려 있다'고 한다. 엉뚱한 화면을
+    // 받아놓고 열려 있다고 하면, 잠가둔 계정을 비활성으로 몰게 된다.
+    if (!/방명록/.test(body)) return null;
+    return "open";
+  } catch {
+    return null;
+  }
+}
+
 // 못 읽으면 null을 준다. 0으로 읽어서 '활동 없음'이라 하면 조용한 실패가 된다.
 export function parseGallogCounts(html) {
   const found = {};
@@ -1188,7 +1278,16 @@ export async function checkGallog(code) {
     }
     if (res.status === 404) return { state: "notfound", counts: null, bytes };
     if (!res.ok) return { state: "other", counts: null, bytes };
-    return { state: "alive", counts: parseGallogCounts(body), bytes };
+    // 방문자 수와 방명록 날짜는 같은 화면에 있다. 여기서 같이 읽으면 요청이 안 는다.
+    return {
+      state: "alive",
+      counts: parseGallogCounts(body),
+      visits: parseGallogVisits(body),
+      guestAt: parseGuestbookLatest(body),
+      // 홈에도 잠김 문구가 나오면 공짜로 안다. 안 나오면 null 이고, 그때만 따로 묻는다.
+      guestPolicy: parseGuestbookPolicy(body),
+      bytes,
+    };
   } catch {
     return { state: "error", counts: null, bytes: 0 };
   }

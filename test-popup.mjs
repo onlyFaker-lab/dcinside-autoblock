@@ -726,5 +726,65 @@ console.log("\n[작업 기록 날짜 표시]");
   ok("같은 날은 한 번만 찍는다", 날짜줄 === 1, `${날짜줄}번`);
 }
 
+// ── 빼기 탭에 방문자·방명록도 보인다 ────────────────────────
+// 글·댓글만 보면 클리너로 0을 맞춰둔 계정을 비활성으로 오해한다.
+// 그런 계정은 방문자가 수백이고 매크로 방명록이 최근이다 (파딱 2026-09-15).
+console.log("\n[빼기 탭 방문자·방명록 표시]");
+{
+  await seed({
+    watchlist: [{
+      kind: "code", value: "aaa1111", enabled: true,
+      gallogTotal: 0, gallogPosts: 0, gallogComments: 0,
+      // 빼기 탭은 기본 3개월(90일)째 그대로인 사람만 보여준다. 120일로 잡는다.
+      gallogCountedAt: Date.now() - 120 * 24 * 3600 * 1000,
+      gallogSince: Date.now() - 120 * 24 * 3600 * 1000,
+      gallogVisits: 456, gallogSeenByUs: 2, gallogGuestAt: "2026.09.15",
+    }],
+  });
+
+  const html = els.get("cleanBody").innerHTML;
+  ok("글·댓글이 보인다", /글 0 \/ 댓 0/.test(html), html);
+  ok("방문자 수가 보인다", /방문 456/.test(html), html);
+  ok("우리가 본 횟수를 빼서 보여준다", /우리 2 제외 454/.test(html), html);
+  ok("방명록 날짜가 보인다", /방명록 2026\.09\.15/.test(html), html);
+}
+
+// 기록이 없으면 없는 대로 둔다. 0으로 적으면 비활성 쪽으로 기울어진다.
+console.log("\n[기록이 없으면 안 지어낸다]");
+{
+  await seed({
+    watchlist: [{ kind: "code", value: "bbb2222", enabled: true,
+                  gallogTotal: 5, gallogPosts: 2, gallogComments: 3,
+                  gallogCountedAt: Date.now() - 120 * 24 * 3600 * 1000,
+                  gallogSince: Date.now() - 120 * 24 * 3600 * 1000 }],
+  });
+  const html = els.get("cleanBody").innerHTML;
+  ok("방문자 칸이 없다", !/방문 /.test(html), html);
+  ok("방명록 칸이 없다", !/방명록 /.test(html), html);
+}
+
+// ── 방명록 잠김 표시 ────────────────────────────────────────
+// 2월이 마지막이어도 그 뒤에 잠가둔 것뿐일 수 있다. 잠긴 계정은 방명록이
+// 비활성 근거가 못 된다. 반대로 열려 있는데도 하나도 없으면 근거가 된다.
+console.log("\n[방명록 잠김 표시]");
+{
+  const 옛날 = Date.now() - 120 * 24 * 3600 * 1000;
+  const 기본 = { kind: "code", enabled: true, gallogTotal: 0, gallogPosts: 0,
+                 gallogComments: 0, gallogCountedAt: 옛날, gallogSince: 옛날 };
+
+  await seed({ watchlist: [{ ...기본, value: "aaa1111", gallogGuestAt: "2026.02.10", gallogGuestOpen: false }] });
+  let html = els.get("cleanBody").innerHTML;
+  ok("잠겼다고 보여준다", /방명록 <span class="muted">잠김<\/span>/.test(html), html);
+  ok("언제까지였는지도 보여준다", /2026\.02\.10까지/.test(html), html);
+
+  await seed({ watchlist: [{ ...기본, value: "bbb2222", gallogGuestOpen: true }] });
+  html = els.get("cleanBody").innerHTML;
+  ok("열려 있는데 없으면 눈에 띄게", /열려 있는데 없음/.test(html), html);
+
+  await seed({ watchlist: [{ ...기본, value: "ccc3333" }] });
+  html = els.get("cleanBody").innerHTML;
+  ok("모르면 아무 말도 안 한다", !/방명록/.test(html), html);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

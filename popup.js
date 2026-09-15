@@ -1061,13 +1061,41 @@ function gallogLabel(t) {
 }
 
 // 갤로그 글·댓글 수와, 그 숫자가 며칠째 그대로인지.
+//
+// 방문자 수와 방명록 날짜도 같이 보여준다 (파딱 제안 2026-09-15).
+// 글·댓글만 보면 놓치는 계정이 있다. 클리너로 글을 지워 0으로 맞춰두면
+// 글·댓글은 그대로인데 실제로는 계속 활동하는 계정이 된다. 그런 계정은
+// 방문자 수가 400~500을 넘고, 매크로 방명록이 간헐적으로 찍힌다.
+//
+// ⚠ 아직 기준으로 걸러내지는 않는다. 눈으로 보고 판단하시라는 뜻이다.
+//    자동으로 거르려면 어느 선에서 자를지 완장과 정해야 한다.
 function gallogActivity(t) {
   if (t.gallogTotal === undefined) return "-";
   const nums = `글 ${t.gallogPosts ?? "?"} / 댓 ${t.gallogComments ?? "?"}`;
   const d = gallogQuietDays(t);
-  if (d === null) return esc(nums);
-  if (d < 1) return `${esc(nums)} <span class="muted">(방금 기록)</span>`;
-  return `${esc(nums)} <span class="${gallogQuiet(t) ? "bad" : "muted"}">${d}일째 그대로</span>`;
+  const 본체 = d === null ? esc(nums)
+    : d < 1 ? `${esc(nums)} <span class="muted">(방금 기록)</span>`
+    : `${esc(nums)} <span class="${gallogQuiet(t) ? "bad" : "muted"}">${d}일째 그대로</span>`;
+
+  const 덧 = [];
+  if (Number.isFinite(t.gallogVisits)) {
+    // 총 방문자는 IP 단위로 하루 1씩 오른다. 확장이 본 횟수만큼은 우리가 올린 것이다.
+    // 그걸 빼야 '남이 얼마나 왔나'가 된다.
+    const 남 = Math.max(0, t.gallogVisits - (t.gallogSeenByUs || 0));
+    덧.push(`방문 ${t.gallogVisits}` + ((t.gallogSeenByUs || 0) ? ` <span class="muted">(우리 ${t.gallogSeenByUs} 제외 ${남})</span>` : ""));
+  }
+  // 방명록은 '잠갔는지'를 같이 봐야 뜻이 있다. 2월이 마지막이어도 그 뒤에
+  // 잠가둔 것뿐일 수 있다(파딱 2026-09-15). 잠긴 계정은 방명록이 비활성 근거가 못 된다.
+  if (t.gallogGuestOpen === false) {
+    덧.push(`방명록 <span class="muted">잠김</span>` + (t.gallogGuestAt ? ` (${esc(t.gallogGuestAt)}까지)` : ""));
+  } else if (t.gallogGuestAt) {
+    덧.push(`방명록 ${esc(t.gallogGuestAt)}`);
+  } else if (t.gallogGuestOpen === true) {
+    // 열려 있는데도 하나도 없다. 비활성 근거가 된다.
+    덧.push(`방명록 <span class="bad">열려 있는데 없음</span>`);
+  }
+  if (!덧.length) return 본체;
+  return `${본체}<br><span class="muted small">${덧.join(" · ")}</span>`;
 }
 
 $("btnActivity").addEventListener("click", () => {

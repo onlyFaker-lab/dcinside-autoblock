@@ -15,9 +15,10 @@ import {
   listPagesFor, isBusy, localDateKey, REASON_VALUES, HOURS_BY_LABEL,
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
   reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, mergeGallog, fetchRowsForCode,
-  BUSY_TIMEOUT_MS,
+  BUSY_TIMEOUT_MS, parseGallogVisits, parseGuestbookLatest, parseGallogCounts,
+  checkGuestbook, parseGuestbookPolicy,
 } from "./dc.js";
-import { row, table } from "./fixtures.mjs";
+import { row, table, gallogPage } from "./fixtures.mjs";
 import { readFileSync } from "node:fs";
 
 // 조회 경로에는 요청 간격(1.2초)과 페이지 간격이 박혀 있다. 검사가 그걸 그대로
@@ -1225,6 +1226,72 @@ console.log("\n[로그인 풀림 감지]");
   // 모르는 기간 표기가 와도 죽지 않고 안전한 쪽으로 떨어져야 한다.
   const 이상 = row({ code: "aaa1111", date: "2026.09.01", time: "10:00:00", state: "차단 중", duration: "영구" });
   eq("모르는 기간도 차단 중으로 본다", 판([이상, 일차]), "active");
+}
+
+// ── [28] 갤로그 방문자 수와 방명록 날짜 ────────────────────
+// 파딱 제안(2026-09-15): 글·댓글이 그대로여도 방문자가 늘거나 방명록 매크로가
+// 최근에 찍혔으면 활성 계정일 수 있다. 둘 다 이미 받아오는 그 페이지에 있어서
+// 요청이 늘지 않는다.
+{
+  console.log("\n[28] 갤로그 방문자·방명록");
+  const h = gallogPage();
+
+  const v = parseGallogVisits(h);
+  eq("총 방문자", v.total, 200);
+  eq("오늘 방문자", v.today, 2);
+
+  // 천 단위 쉼표는 이 프로젝트가 이미 한 번 크게 데인 자리다(v1.6.5).
+  eq("쉼표가 붙어도 읽는다", parseGallogVisits(gallogPage({ total: "12,345" })).total, 12345);
+  eq("0도 읽는다", parseGallogVisits(gallogPage({ total: 0 })).total, 0);
+
+  // <span class="num">(590)</span> 과 헷갈리면 안 된다.
+  ok("게시글 수를 방문자로 읽지 않는다", parseGallogVisits(gallogPage({ posts: 777, total: 30 })).total === 30);
+  ok("방문자 칸이 없으면 null", parseGallogVisits("<html></html>") === null);
+
+  eq("방명록 최신 날짜", parseGuestbookLatest(h), "2026.09.15");
+  eq("순서가 뒤섞여도 가장 최근", parseGuestbookLatest(gallogPage({ guestbook: ["2026.07.31", "2026.09.15", "2026.08.07"] })), "2026.09.15");
+  ok("방명록이 비면 null", parseGuestbookLatest(gallogPage({ guestbook: [] })) === null);
+  ok("방명록 칸 자체가 없으면 null", parseGuestbookLatest("<html></html>") === null);
+
+  // ⚠ 함정. 게시글이 공개면 게시글 목록에도 class="date" 가 나온다.
+  // 구역을 안 나누고 통째로 긁으면 게시글 날짜를 방명록 날짜로 착각한다.
+  eq("게시글 날짜를 방명록으로 착각하지 않는다",
+     parseGuestbookLatest(gallogPage({ publicPosts: true })), "2026.09.15");
+
+  // 글·댓글 읽기는 그대로 돌아야 한다.
+  const c = parseGallogCounts(h);
+  eq("게시글 수", c.posts, 590);
+  eq("댓글 수", c.comments, 1096);
+}
+
+// ── [29] 방명록 잠김 판정은 모르면 모른다고 한다 ────────────
+// 못 찾았다고 '열려 있다'로 단정하면, 잠가둔 계정을 비활성으로 몰게 된다.
+// 방명록이 오래된 게 비활성 근거가 되어버리기 때문이다 (파딱 지적 2026-09-15).
+{
+  console.log("\n[29] 방명록 잠김 판정");
+  const 응답 = (body, ok = true) => {
+    globalThis.fetch = async () => ({ ok, status: ok ? 200 : 500, text: async () => body });
+  };
+
+  응답(`<h4>방명록(0)</h4><p>허용된 사용자만 방명록을 작성할 수 있습니다.</p>`);
+  eq("문구가 있으면 잠김", await checkGuestbook("aaa1111"), "closed");
+
+  응답(`<h4>방명록(3)</h4><ul><li>안녕</li></ul>`);
+  eq("방명록 화면이면 열림", await checkGuestbook("aaa1111"), "open");
+
+  // 엉뚱한 화면을 받았을 때. 열려 있다고 하면 안 된다.
+  응답(`<html><body>잠시 후 다시 시도해 주세요</body></html>`);
+  eq("방명록 화면이 아니면 모름", await checkGuestbook("aaa1111"), null);
+
+  응답(`<html></html>`, false);
+  eq("응답이 실패면 모름", await checkGuestbook("aaa1111"), null);
+
+  globalThis.fetch = async () => { throw new Error("끊김"); };
+  eq("요청이 끊겨도 모름", await checkGuestbook("aaa1111"), null);
+
+  // 홈 화면에 문구가 있으면 거기서 바로 안다.
+  eq("홈에 문구가 있으면 잠김", parseGuestbookPolicy(gallogPage({ guestClosedOnHome: true })), "closed");
+  eq("홈에 문구가 없으면 모름", parseGuestbookPolicy(gallogPage()), null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

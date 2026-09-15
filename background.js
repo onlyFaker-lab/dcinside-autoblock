@@ -6,7 +6,7 @@
 import {
   HOURS_31D, analyzeCode, blockCodes, collectByDuration, fetchRowsForCode,
   collectActivity, checkGallog, pickGallogTargets,
-  isBusy, localDateKey, jitter, dueTargets, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FETCH_SECS,
+  isBusy, localDateKey, jitter, dueTargets, checkGuestbook, CHECK_DELAY_MS, FETCH_SECS, GALLOG_DELAY_MS, GALLOG_FETCH_SECS,
   GALLOG_FAIL_STREAK,
   rowHealth, carryOver,
 } from "./dc.js";
@@ -1050,6 +1050,17 @@ async function runActivity(months = 3, maxPages = 2000) {
 //   3. 연속으로 실패하면 즉시 멈춘다. 이미 막힌 뒤에 계속 두드리지 않는다
 async function runGallog(limit = 50, months = 0, onlyCodes = null) {
   const { watchlist, status } = await getState();
+
+  // 방명록이 '오래됐다'고 볼 기준. 활동 점검과 같은 개월 수를 쓴다.
+  // 날짜를 "2026.09.15" 문자열로 들고 있으므로 비교도 문자열로 한다(정렬이 곧 날짜순).
+  const guestMonths = Math.max(0, Number(months) || 0);
+  const guestCut = (() => {
+    if (!guestMonths) return "";
+    const d = new Date(Date.now() - guestMonths * 30 * 24 * 3600 * 1000);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())}`;
+  })();
+  let guestChecked = 0;   // 방명록 잠김 여부를 따로 물어본 횟수
   if (isBusy(status)) {
     await log("이미 다른 작업이 돌고 있습니다.");
     return { ok: false };
@@ -1110,7 +1121,7 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
   try {
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
-      const { state, counts, bytes } = await checkGallog(t.value);
+      const { state, counts, visits, guestAt, guestPolicy, bytes } = await checkGallog(t.value);
       done++;
       t.gallogState = state;
       t.gallogCheckedAt = now;
@@ -1122,13 +1133,58 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
         t.gallogCountedAt = now;
         t.gallogPosts = counts.posts;
         t.gallogComments = counts.comments;
+
+        // 방문자 수와 방명록 최신 날짜도 같이 남긴다. 둘 다 방금 받아온 그 화면에
+        // 들어 있어서 요청이 늘지 않는다 (파딱 제안 2026-09-15).
+        //
+        // 총 방문자는 IP 단위로 하루 1씩만 오른다. 그래서 확장이 한 번 볼 때마다
+        // 그 계정 방문자가 1 오른다. 몇 번 봤는지 세어두면 '실제로 남이 얼마나
+        // 왔는지'를 뺄셈으로 알 수 있다. 이 보정이 없으면 점검을 다섯 번 한 것만으로
+        // '방문자 5 늘었다 = 활성'이 되어버린다.
+        if (visits && Number.isFinite(visits.total)) {
+          t.gallogSeenByUs = (t.gallogSeenByUs || 0) + 1;
+          if (t.gallogVisits !== visits.total) {
+            t.gallogVisits = visits.total;
+            t.gallogVisitsSince = now;
+          }
+        }
+        // 방명록을 안 쓰는 계정은 null 이다. 없다고 0으로 적으면 '오래전'으로
+        // 보여서 비활성 쪽으로 기울어진다. 모르는 건 모르는 채로 둔다.
+        if (guestAt) t.gallogGuestAt = guestAt;
+
+        }
         // 숫자가 그대로면 gallogSince를 건드리지 않는다. 그래야 '언제부터
         // 이 숫자였는지'가 쌓인다. 바뀌었으면 그 순간부터 다시 센다.
         // 줄어든 것도 '변동'이다. 글을 지운 것도 활동한 흔적이니 명단에 남긴다.
-        if (t.gallogTotal !== counts.total) {
+        const changed = t.gallogTotal !== counts.total;
+        if (changed) {
           t.gallogTotal = counts.total;
           t.gallogSince = now;
         }
+
+        // 방명록을 잠가둔 계정인지 확인한다 (파딱 제안 2026-09-15).
+        //
+        // "2월 이후 방명록을 비허용해둬서 새 방명록이 없는 경우도 있다."
+        // 그러면 '방명록이 오래됐다 = 비활성'이 틀린다. 잠가둔 것뿐이다.
+        //
+        // ⚠ 이건 요청이 하나 더 나간다. 아무에게나 하면 안 된다.
+        //    파딱이 정해준 범위대로, **비활성이 의심되면서 방명록이 근거를 못 주는
+        //    사람**만 본다. 글·댓글이 늘었으면 이미 활성이라 볼 필요가 없고,
+        //    방명록이 최근이면 그것만으로 활성이라 역시 볼 필요가 없다.
+        const 글댓그대로 = !changed;
+        const 방명록오래됨 = !guestAt || (guestMonths > 0 && guestAt < guestCut);
+        if (글댓그대로 && 방명록오래됨 && t.gallogGuestOpen === undefined) {
+          // 홈 화면에 이미 문구가 있으면 공짜다. 그때는 더 안 묻는다.
+          const fromHome = guestPolicy;
+          if (fromHome) {
+            t.gallogGuestOpen = fromHome === "open";
+          } else {
+            await new Promise((r) => setTimeout(r, jitter(GALLOG_DELAY_MS)));
+            const policy = await checkGuestbook(t.value);
+            guestChecked++;
+            if (policy) t.gallogGuestOpen = policy === "open";
+            await touchBusy();
+          }
       } else if (state === "alive") {
         uncounted++;
         streak++;
@@ -1162,7 +1218,8 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
       `정상 ${tally.alive}명, 판단 불가 ${tally.other + tally.error}명`
     );
     if (counted) {
-      await log(`  ${counted}명의 글·댓글 수를 기록했습니다.`);
+      await log(`  ${counted}명의 글·댓글 수를 기록했습니다.` +
+      (guestChecked ? ` 그중 ${guestChecked}명은 방명록이 잠겨 있는지 따로 확인했습니다.` : ""));
     }
 
     if (aborted) {

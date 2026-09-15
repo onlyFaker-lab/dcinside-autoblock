@@ -56,3 +56,42 @@ export const table = (rows) => `<table class="minor_block_list">
 		  <thead><tr><th scope="col">번호</th></tr></thead>
 		  <tbody>${rows.join("")}</tbody>
 		</table>`;
+
+
+// ── 갤로그 화면 ──────────────────────────────────────────────
+// 2026-09-15 파딱이 보낸 실제 갤로그 소스에서 그대로 떼어왔다.
+// class="total_num " 의 뒤쪽 공백, "2/" 의 슬래시, onclick 이 낀 h2 까지 실물 그대로다.
+// 지어낸 마크업으로 바꾸지 말 것.
+
+export function gallogPage({
+  posts = 590, comments = "1,096", scraps = 1,
+  today = 2, total = 200,
+  guestbook = ["2026.09.15", "2026.09.01"],
+  // 게시글이 공개면 게시글 목록에도 class="date" 가 나온다. 방명록 날짜를 찾을 때
+  // 구역을 안 나누면 이걸 방명록으로 착각한다. 그 함정을 재현하는 스위치.
+  publicPosts = false,
+  // 홈 화면에도 잠김 문구가 나오는 경우. 나오면 방명록 페이지를 따로 안 봐도 된다.
+  guestClosedOnHome = false,
+} = {}) {
+  const head = (label, n, href) =>
+    `<h2 class="tit" onclick="location.href='/because8084/${href}';" style="cursor:pointer">${label}<span class="num">(${n})</span></h2>`;
+  const gstLi = (d) =>
+    `<li><span class="writer_info"><em class='nickname in' title='ㅇㅇ'>ㅇㅇ</em>\n<span class="date">${d}</span></span></li>`;
+
+  return `<div class="tright_box clear">
+  <div class="visitors_num rbox">
+    <span class="today_num">오늘의 방문자<em class="today_num">${today}/</em><em class="total_num ">${total}</em></span>
+  </div>
+</div>
+<section><div class="gallog_cont">
+  ${head("게시글", posts, "posting")}
+  ${publicPosts ? `<ul class="cont_listbox"><li><span class="date">2026.12.31</span></li></ul>` : `<div class="gallog_empty small">게시글이 없습니다.</div>`}
+</div></section>
+<section><div class="gallog_cont comments">${head("댓글", comments, "comment")}</div></section>
+<section><div class="gallog_cont scraps">${head("스크랩", scraps, "scrap")}</div></section>
+<section><div class="gallog_cont gstbook">
+  ${head("방명록", guestbook.length, "guestbook")}
+  ${guestClosedOnHome ? `<p>허용된 사용자만 방명록을 작성할 수 있습니다.</p>` : ""}
+  ${guestbook.length ? `<ul class="cont_listbox">${guestbook.map(gstLi).join("")}</ul>` : `<div class="gallog_empty small">방명록이 없습니다.</div>`}
+</div></section>`;
+}

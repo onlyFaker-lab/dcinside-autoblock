@@ -16,7 +16,10 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import * as dcMod from "./dc.js";
-import { row, table } from "./fixtures.mjs";
+import { row, table, gallogPage } from "./fixtures.mjs";
+
+// 코드별 갤로그 상태. 점검 때 화면에 그려 준다.
+const gallogState = new Map();
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = "") {
@@ -89,8 +92,22 @@ const fakeFetch = async (url, opts = {}) => {
       return { ok: false, status: 404, url: String(url),
         text: async () => `<script>location.replace("https://gallog.dcinside.com/_error/deleted");</script>` };
     }
+    // 방명록 페이지는 따로 요청된다. 잠긴 계정은 안내 문구를 돌려준다.
+    if (String(url).includes("/guestbook")) {
+      const c = String(url).split("/").slice(-2)[0];
+      const g2 = gallogState.get(c) || {};
+      return { ok: true, status: 200, url: String(url),
+        text: async () => g2.guestClosed
+          ? `<h4>방명록(0)</h4><p>허용된 사용자만 방명록을 작성할 수 있습니다.</p>`
+          : `<h4>방명록(0)</h4><p>방명록이 없습니다.</p>` };
+    }
+    const g = gallogState.get(code) || {};
     return { ok: true, status: 200, url: String(url),
-      text: async () => `<html><body>갤로그 <span class="num">12</span></body></html>` };
+      text: async () => gallogPage({
+        posts: g.posts ?? 10, comments: g.comments ?? 20,
+        total: g.visits ?? 100, guestbook: g.guestbook ?? ["2026.09.01"],
+        guestClosedOnHome: !!g.guestClosedOnHome,
+      }) };
   }
 
   const u = new URL(String(url));
@@ -179,6 +196,7 @@ function send(msg) {
 async function setup({ codes, recheck = true, maxPerRun = 100, candidatesAt = Date.now() }) {
   world.clear();
   deleted.clear();
+  gallogState.clear();
   intervals.length = 0;
   requests = [];
   failNextFetch = null;
@@ -561,6 +579,136 @@ console.log("\n[18] 갤로그 예상 시간");
   ok("164명을 5분 이상으로 잡는다", mins >= 5, `${mins}분`);
   // 너무 부풀려도 안 된다. 두 배로 말하면 완장이 안 돌린다.
   ok("164명을 8분 넘게 잡지는 않는다", mins <= 8, `${mins}분`);
+}
+
+// ── [19] 갤로그 점검이 방문자·방명록도 기록한다 ─────────────
+// 파딱 제안(2026-09-15). 둘 다 이미 받아오는 화면에 있어서 요청이 늘지 않는다.
+// 글·댓글이 그대로여도 방문자가 늘거나 방명록이 최근이면 활성 계정일 수 있다.
+console.log("\n[19] 갤로그 점검이 방문자·방명록도 남긴다");
+{
+  world.clear(); requests = []; deleted.clear(); gallogState.clear(); intervals.length = 0;
+  gallogState.set("aaa1111", { posts: 5, comments: 9, visits: 180, guestbook: ["2026.09.10"] });
+
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [{ kind: "code", value: "aaa1111", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+
+  await send({ type: "gallog", limit: 10, months: 0 });
+  const t = stored.watchlist.find((x) => x.value === "aaa1111") || {};
+
+  eq("글 수", t.gallogPosts, 5);
+  eq("댓글 수", t.gallogComments, 9);
+  eq("방문자 수", t.gallogVisits, 180);
+  eq("방명록 최신 날짜", t.gallogGuestAt, "2026.09.10");
+  eq("우리가 본 횟수", t.gallogSeenByUs, 1);
+
+  // 요청이 늘지 않아야 한다. 한 명당 갤로그 한 번뿐이다.
+  const gallogReqs = requests.filter((r) => r.url.includes("gallog.dcinside.com")).length;
+  eq("한 명당 요청 1회", gallogReqs, 1);
+}
+
+// ── [20] 우리가 본 횟수를 세어 방문자 증가를 보정할 수 있다 ──
+// 총 방문자는 IP 단위로 하루 1씩 오른다. 확장이 볼 때마다 1이 오르므로,
+// 보정하지 않으면 점검 다섯 번만으로 '방문자 5 늘었다 = 활성'이 된다.
+console.log("\n[20] 우리가 본 횟수를 센다");
+{
+  gallogState.set("bbb2222", { visits: 100, guestbook: [] });
+  stored.watchlist = [{ kind: "code", value: "bbb2222", reason: "음란성", enabled: true }];
+  stored.logs = [];
+
+  await send({ type: "gallog", limit: 10, months: 0 });
+
+  // 같은 사람을 12시간 안에 또 보지는 않는다(그 자체가 맞는 규칙이다).
+  // 하루 지난 셈 치고 시계를 되돌린 뒤 다시 본다.
+  const me = stored.watchlist.find((x) => x.value === "bbb2222");
+  me.gallogCountedAt -= 25 * 3600 * 1000;
+  me.gallogCheckedAt -= 25 * 3600 * 1000;
+  gallogState.set("bbb2222", { visits: 101, guestbook: [] });   // 우리 방문분만 오름
+  await send({ type: "gallog", limit: 10, months: 0 });
+
+  const t = stored.watchlist.find((x) => x.value === "bbb2222") || {};
+  eq("두 번 봤다고 센다", t.gallogSeenByUs, 2);
+  eq("방문자는 101", t.gallogVisits, 101);
+  ok("우리 방문분을 빼면 남이 온 건 없다", t.gallogVisits - t.gallogSeenByUs <= 100);
+}
+
+// ── [21] 방명록 잠김 확인은 좁은 범위에서만 ─────────────────
+// 파딱 지적(2026-09-15): 방명록이 2월이 마지막이어도 그 뒤에 잠가둔 것일 수 있다.
+// 그러면 '방명록이 오래됐다 = 비활성'이 틀린다.
+//
+// 다만 이건 요청이 하나 더 나간다. 글·댓글이 늘었으면 이미 활성이라 볼 필요가
+// 없고, 방명록이 최근이면 그것만으로 활성이라 역시 볼 필요가 없다.
+console.log("\n[21] 방명록 잠김 확인 범위");
+{
+  const 기본 = (o) => ({ kind: "code", reason: "음란성", enabled: true, ...o });
+  world.clear(); requests = []; deleted.clear(); gallogState.clear(); intervals.length = 0;
+
+  // 글·댓글이 그대로고 방명록도 없음 → 확인 대상
+  gallogState.set("quiet001", { posts: 1, comments: 2, visits: 10, guestbook: [], guestClosed: true });
+  // 글·댓글이 늘었음 → 이미 활성. 확인 안 함
+  gallogState.set("busy0002", { posts: 9, comments: 9, visits: 10, guestbook: [] });
+  // 방명록이 최근 → 그것만으로 활성. 확인 안 함
+  gallogState.set("guest003", { posts: 1, comments: 2, visits: 10, guestbook: ["2026.09.14"] });
+
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [
+      기본({ value: "quiet001", gallogTotal: 3 }),      // 1+2 = 그대로
+      기본({ value: "busy0002", gallogTotal: 3 }),      // 9+9 = 늘었음
+      기본({ value: "guest003", gallogTotal: 3 }),      // 그대로지만 방명록 최근
+    ],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+
+  await send({ type: "gallog", limit: 10, months: 3 });
+  const 방명록요청 = requests.filter((r) => r.url.includes("/guestbook")).map((r) => r.url.split("/").slice(-2)[0]);
+  const by = new Map(stored.watchlist.map((t) => [t.value, t]));
+
+  eq("따로 물어본 사람은 한 명뿐", 방명록요청.length, 1);
+  eq("그 한 명이 조용한 사람", 방명록요청[0], "quiet001");
+  ok("글·댓글 늘어난 사람은 안 물어본다", !방명록요청.includes("busy0002"));
+  ok("방명록 최근인 사람은 안 물어본다", !방명록요청.includes("guest003"));
+
+  eq("잠긴 것으로 기록한다", by.get("quiet001").gallogGuestOpen, false);
+  ok("안 물어본 사람은 모르는 채로 둔다", by.get("busy0002").gallogGuestOpen === undefined);
+  ok("몇 명을 따로 봤는지 밝힌다", /1명은 방명록이 잠겨 있는지 따로 확인했습니다/.test(logText()), logText());
+}
+
+// 잠겨 있지 않으면 열린 것으로 기록한다. 이때는 방명록이 없는 게 비활성 근거가 된다.
+console.log("\n[22] 방명록이 열려 있는데도 비어 있으면");
+{
+  world.clear(); requests = []; gallogState.clear(); intervals.length = 0;
+  gallogState.set("open0001", { posts: 1, comments: 2, visits: 10, guestbook: [], guestClosed: false });
+  stored.watchlist = [{ kind: "code", value: "open0001", reason: "음란성", enabled: true, gallogTotal: 3 }];
+  stored.logs = [];
+
+  await send({ type: "gallog", limit: 10, months: 3 });
+  const t = stored.watchlist[0];
+  eq("열린 것으로 기록한다", t.gallogGuestOpen, true);
+}
+
+// ── [23] 홈에 잠김 문구가 있으면 따로 안 묻는다 ─────────────
+// 같은 화면에서 이미 알 수 있는 걸 또 물으면 요청만 는다.
+// 이 프로젝트에서 요청 수는 곧 IP 차단 위험이다.
+console.log("\n[23] 홈에서 알 수 있으면 요청을 아낀다");
+{
+  world.clear(); requests = []; gallogState.clear(); intervals.length = 0;
+  gallogState.set("home0001", { posts: 1, comments: 2, visits: 10, guestbook: [], guestClosedOnHome: true });
+  stored.watchlist = [{ kind: "code", value: "home0001", reason: "음란성", enabled: true, gallogTotal: 3 }];
+  stored.logs = [];
+
+  await send({ type: "gallog", limit: 10, months: 3 });
+  const 방명록요청 = requests.filter((r) => r.url.includes("/guestbook")).length;
+
+  eq("방명록 페이지를 따로 안 본다", 방명록요청, 0);
+  eq("그래도 잠김을 안다", (stored.watchlist[0] || {}).gallogGuestOpen, false);
+  eq("갤로그 요청은 한 번뿐", requests.filter((r) => r.url.includes("gallog.dcinside.com")).length, 1);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
