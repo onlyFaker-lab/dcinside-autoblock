@@ -1121,7 +1121,7 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
   try {
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
-      const { state, counts, visits, guestAt, guestPolicy, bytes } = await checkGallog(t.value);
+      const { state, counts, visits, guestAt, guestPolicy, sections, bytes } = await checkGallog(t.value);
       done++;
       t.gallogState = state;
       t.gallogCheckedAt = now;
@@ -1152,7 +1152,30 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
         // 보여서 비활성 쪽으로 기울어진다. 모르는 건 모르는 채로 둔다.
         if (guestAt) t.gallogGuestAt = guestAt;
 
+        // 구역별 최신 날짜. 2026-09-16 파딱 갱차 시트 3,740행을 대조해보니,
+        // 파딱이 실제로 판정에 쓴 것은 글·댓글 '수'가 아니라 마지막 활동 '날짜'였다.
+        //   O(갱차 필요) 1,149명 중 1,012명 근거가 "방명록 8월 기록 있음"
+        //   X(해제함)    은 "최신글 2. 7." 처럼 몇 달 전 날짜
+        // "마지막 활동이 확인 시점 한 달 이내면 활성" 한 줄로 2,024건 중 98.3%가 맞았다.
+        //
+        // 숫자 변동은 두 번째 점검부터 뜻이 생기지만 날짜는 첫 점검부터 나온다.
+        // 그리고 이 값들은 방금 받아온 그 화면에 있어서 요청이 늘지 않는다.
+        //
+        // ⚠ 비공개는 '활동 없음'이 아니라 '못 봄'이다. 뭉개면 비공개 계정이
+        //    통째로 비활성으로 몰린다. 못 봤으면 날짜를 아예 안 적는다.
+        if (sections) {
+          if (sections.posts.latest) t.gallogPostAt = sections.posts.latest;
+          if (sections.comments.latest) t.gallogCommentAt = sections.comments.latest;
+          if (sections.posts.visible !== null) t.gallogPostsOpen = sections.posts.visible;
+          if (sections.comments.visible !== null) t.gallogCommentsOpen = sections.comments.visible;
+
+          // 셋 중 가장 최근. "2026.09.15" 는 문자열 정렬이 곧 날짜순이다.
+          // 하나도 모르면 적지 않는다. 0이나 빈 문자열로 적으면 '아주 오래전'으로
+          // 보여서 비활성 쪽으로 기울어진다.
+          const 날짜들 = [t.gallogPostAt, t.gallogCommentAt, t.gallogGuestAt].filter(Boolean);
+          if (날짜들.length) t.gallogLastAt = 날짜들.sort().at(-1);
         }
+
         // 숫자가 그대로면 gallogSince를 건드리지 않는다. 그래야 '언제부터
         // 이 숫자였는지'가 쌓인다. 바뀌었으면 그 순간부터 다시 센다.
         // 줄어든 것도 '변동'이다. 글을 지운 것도 활동한 흔적이니 명단에 남긴다.
@@ -1185,6 +1208,7 @@ async function runGallog(limit = 50, months = 0, onlyCodes = null) {
             if (policy) t.gallogGuestOpen = policy === "open";
             await touchBusy();
           }
+        }
       } else if (state === "alive") {
         uncounted++;
         streak++;

@@ -786,5 +786,47 @@ console.log("\n[방명록 잠김 표시]");
   ok("모르면 아무 말도 안 한다", !/방명록/.test(html), html);
 }
 
+// ── 빼기 탭에 마지막 활동 날짜가 보인다 ─────────────────────
+// 2026-09-16 파딱 갱차 시트 3,740행 대조. 파딱이 실제로 판정에 쓴 것은
+// 글·댓글 '수'가 아니라 마지막 활동 '날짜'였다. 화면에서도 그게 먼저 보여야 한다.
+console.log("\n[빼기 탭 마지막 활동 날짜]");
+{
+  const 옛날 = Date.now() - 120 * 24 * 3600 * 1000;
+  const 기본 = { kind: "code", enabled: true, gallogTotal: 0, gallogPosts: 0,
+                 gallogComments: 0, gallogCountedAt: 옛날, gallogSince: 옛날 };
+  const 날 = (d) => {
+    const x = new Date(Date.now() - d * 24 * 3600 * 1000);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${x.getFullYear()}.${p2(x.getMonth() + 1)}.${p2(x.getDate())}`;
+  };
+
+  await seed({ watchlist: [{ ...기본, value: "aaa1111",
+    gallogPostAt: 날(200), gallogCommentAt: 날(150), gallogGuestAt: 날(150),
+    gallogLastAt: 날(150), gallogPostsOpen: true, gallogCommentsOpen: true }] });
+  let html = els.get("cleanBody").innerHTML;
+  ok("마지막 활동이 보인다", /마지막 활동/.test(html), html);
+  ok("며칠 전인지도 보인다", /150일 전/.test(html), html);
+  ok("오래됐으면 눈에 띄게", /마지막 활동 <span class="bad">/.test(html), html);
+  ok("글·댓 날짜를 갈라서 보여준다", /글 20\d\d\.\d\d\.\d\d \/ 댓 20\d\d/.test(html), html);
+
+  // 최근이면 강조하지 않는다.
+  await seed({ watchlist: [{ ...기본, value: "bbb2222",
+    gallogPostAt: 날(3), gallogLastAt: 날(3), gallogPostsOpen: true }] });
+  html = els.get("cleanBody").innerHTML;
+  ok("최근이면 강조 안 함", !/마지막 활동 <span class="bad">/.test(html), html);
+
+  // ⚠ 비공개는 '활동 없음'이 아니라 '못 봄'이다. 뭉개면 비공개 계정이 비활성으로 몰린다.
+  await seed({ watchlist: [{ ...기본, value: "ccc3333",
+    gallogPostsOpen: false, gallogCommentsOpen: false }] });
+  html = els.get("cleanBody").innerHTML;
+  ok("비공개면 모른다고 적는다", /비공개라 모름/.test(html), html);
+  ok("비공개를 오래됐다고 하지 않는다", !/일 전/.test(html), html);
+
+  // 기록이 아예 없으면 안 지어낸다.
+  await seed({ watchlist: [{ ...기본, value: "ddd4444" }] });
+  html = els.get("cleanBody").innerHTML;
+  ok("모르면 아무 말도 안 한다", !/마지막 활동/.test(html), html);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

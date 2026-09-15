@@ -1157,6 +1157,45 @@ export function parseGallogVisits(html) {
   return { total, today: Number.isFinite(today) ? today : null };
 }
 
+const RE_SECTION_ANCHOR =
+  /location\.href='\/[^/']+\/(posting|comment|scrap|guestbook)'/g;
+
+export function splitGallogZones(html) {
+  const body = html || "";
+  const marks = [];
+  for (const m of body.matchAll(RE_SECTION_ANCHOR)) marks.push({ kind: m[1], at: m.index });
+  if (!marks.length) return null;
+  marks.sort((a, b) => a.at - b.at);
+  const zones = {};
+  marks.forEach((mk, i) => {
+    const end = i + 1 < marks.length ? marks[i + 1].at : body.length;
+    zones[mk.kind] = body.slice(mk.at, end);
+  });
+  return zones;
+}
+
+const RE_DATE_IN_ZONE = /class="date"[^>]*>\s*(\d{4}\.\d{2}\.\d{2})/g;
+
+function zoneLatest(zone) {
+  const d = [...zone.matchAll(RE_DATE_IN_ZONE)].map((m) => m[1]);
+  return d.length ? d.sort().at(-1) : null;
+}
+
+function zoneVisible(zone) {
+  if (/>\s*비공개\s*</.test(zone)) return false;
+  if (/>\s*공개\s*</.test(zone)) return true;
+  return null;
+}
+
+export function parseGallogSections(html) {
+  const zones = splitGallogZones(html);
+  if (!zones) return null;
+  const pick = (k) =>
+    zones[k] ? { latest: zoneLatest(zones[k]), visible: zoneVisible(zones[k]) }
+             : { latest: null, visible: null };
+  return { posts: pick("posting"), comments: pick("comment"), guestbook: pick("guestbook") };
+}
+
 // 방명록 최신 날짜. 매크로 방명록이 간헐적으로 찍히는 계정이 있어서, 글·댓글이
 // 그대로고 방문자도 안 늘었는데 방명록만 최근이면 클리너를 쓰는 활성 계정일 수
 // 있다는 파딱 제안(2026-09-15). 확정 근거가 아니라 참고 지표다.
@@ -1165,17 +1204,10 @@ export function parseGallogVisits(html) {
 //    (이 갤로그는 게시글이 비공개라 안 보였을 뿐이다.)
 //    그래서 반드시 방명록 구역 안에서만 찾는다. 통째로 긁으면 게시글 날짜를
 //    방명록 날짜로 착각한다.
-const RE_GSTBOOK_DATE = /class="date"[^>]*>\s*([\d]{4}\.[\d]{2}\.[\d]{2})/g;
-
 export function parseGuestbookLatest(html) {
-  const body = html || "";
-  const i = body.indexOf("gallog_cont gstbook");
-  if (i < 0) return null;             // 방명록을 안 쓰는 계정
-  const end = body.indexOf("</section>", i);
-  const zone = body.slice(i, end < 0 ? body.length : end);
-  const dates = [...zone.matchAll(RE_GSTBOOK_DATE)].map((m) => m[1]);
-  if (!dates.length) return null;     // 방명록 칸은 있는데 글이 없음
-  return dates.sort().at(-1);         // "2026.09.15" 문자열 정렬이 곧 날짜순이다
+  const zones = splitGallogZones(html);
+  if (!zones || !zones.guestbook) return null;
+  return zoneLatest(zones.guestbook);
 }
 
 // 방명록을 잠가둔 계정인지. 2026-09-15 파딱 지적:
@@ -1279,11 +1311,13 @@ export async function checkGallog(code) {
     if (res.status === 404) return { state: "notfound", counts: null, bytes };
     if (!res.ok) return { state: "other", counts: null, bytes };
     // 방문자 수와 방명록 날짜는 같은 화면에 있다. 여기서 같이 읽으면 요청이 안 는다.
+    const sections = parseGallogSections(body);
     return {
       state: "alive",
       counts: parseGallogCounts(body),
       visits: parseGallogVisits(body),
-      guestAt: parseGuestbookLatest(body),
+      sections,
+      guestAt: sections ? sections.guestbook.latest : null,
       // 홈에도 잠김 문구가 나오면 공짜로 안다. 안 나오면 null 이고, 그때만 따로 묻는다.
       guestPolicy: parseGuestbookPolicy(body),
       bytes,

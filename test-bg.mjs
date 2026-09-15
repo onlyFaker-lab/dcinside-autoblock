@@ -103,9 +103,11 @@ const fakeFetch = async (url, opts = {}) => {
     }
     const g = gallogState.get(code) || {};
     return { ok: true, status: 200, url: String(url),
-      text: async () => gallogPage({
+      text: async () => g.broken ? `<html><body>갤로그 개편중</body></html>` : gallogPage({
         posts: g.posts ?? 10, comments: g.comments ?? 20,
         total: g.visits ?? 100, guestbook: g.guestbook ?? ["2026.09.01"],
+        postDates: g.postDates ?? [], commentDates: g.commentDates ?? [],
+        postsVisible: g.postsVisible !== false,
         guestClosedOnHome: !!g.guestClosedOnHome,
       }) };
   }
@@ -709,6 +711,86 @@ console.log("\n[23] 홈에서 알 수 있으면 요청을 아낀다");
   eq("방명록 페이지를 따로 안 본다", 방명록요청, 0);
   eq("그래도 잠김을 안다", (stored.watchlist[0] || {}).gallogGuestOpen, false);
   eq("갤로그 요청은 한 번뿐", requests.filter((r) => r.url.includes("gallog.dcinside.com")).length, 1);
+}
+
+// ── [24] 글·댓글 수를 못 읽어도 점검이 죽지 않는다 ───────────
+// v1.7.14 에서 중괄호가 어긋나 counts 가 null 일 때도 그 줄이 그대로 돌았다.
+// "Cannot read properties of null" 로 갤로그 점검이 통째로 죽었고, 하필 그 상황이
+// 디시가 IP를 막아 빈 응답을 줄 때다(2026-09-08 사고와 같은 조건).
+// 검사 97개가 통과한 이유는 가짜 디시가 언제나 멀쩡한 화면만 줬기 때문이다. 원칙 8번.
+console.log("\n[24] 글·댓글 수를 못 읽는 계정");
+{
+  world.clear(); requests = []; deleted.clear(); gallogState.clear(); intervals.length = 0;
+  gallogState.set("broke001", { broken: true });
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [{ kind: "code", value: "broke001", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+  await send({ type: "gallog", limit: 10, months: 0 });
+
+  const 기록 = stored.logs.map((l) => l.message || "").join("\n");
+  ok("오류로 죽지 않는다", !/Cannot read properties/.test(기록));
+  ok("못 읽었다고 경고한다", /글·댓글 수를 읽지 못했습니다/.test(기록));
+
+  const t = stored.watchlist.find((x) => x.value === "broke001") || {};
+  ok("못 읽었으면 숫자를 적지 않는다", t.gallogTotal === undefined);
+  eq("그래도 본 것은 기록한다", t.gallogState, "alive");
+}
+
+// ── [25] 갤로그 점검이 구역별 최신 날짜도 남긴다 ─────────────
+// 2026-09-16 파딱 갱차 시트 3,740행을 대조한 결과, 파딱이 실제로 쓴 기준은
+// 글·댓글 '수'가 아니라 마지막 활동 '날짜'였다. 날짜는 이미 받아오는 그 화면에
+// 있어서 요청이 늘지 않고, 숫자 변동과 달리 첫 바퀴부터 판정이 나온다.
+console.log("\n[25] 갤로그 구역별 최신 날짜 기록");
+{
+  world.clear(); requests = []; deleted.clear(); gallogState.clear(); intervals.length = 0;
+  gallogState.set("date0001", {
+    posts: 5, comments: 9, visits: 180,
+    postDates: ["2026.09.15"], commentDates: ["2026.09.10"],
+    guestbook: ["2026.04.02"],
+  });
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [{ kind: "code", value: "date0001", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+  await send({ type: "gallog", limit: 10, months: 0 });
+  const t = stored.watchlist.find((x) => x.value === "date0001") || {};
+
+  eq("게시글 최신 날짜", t.gallogPostAt, "2026.09.15");
+  eq("댓글 최신 날짜", t.gallogCommentAt, "2026.09.10");
+  // ⚠ 구역을 안 나누면 게시글 날짜가 방명록으로 샌다. 5개월 쉰 계정이 오늘 활동한 것으로 보인다.
+  eq("방명록 날짜가 게시글에 오염되지 않는다", t.gallogGuestAt, "2026.04.02");
+  eq("마지막 활동은 셋 중 가장 최근", t.gallogLastAt, "2026.09.15");
+  eq("게시글 공개 여부", t.gallogPostsOpen, true);
+
+  eq("한 명당 요청 1회", requests.filter((r) => r.url.includes("gallog.dcinside.com")).length, 1);
+}
+
+// ── [26] 비공개는 '활동 없음'이 아니다 ──────────────────────
+// 못 본 것과 안 한 것을 뭉개면 비공개 계정이 통째로 비활성으로 몰린다. 원칙 2번.
+console.log("\n[26] 게시글 비공개 계정");
+{
+  world.clear(); requests = []; deleted.clear(); gallogState.clear(); intervals.length = 0;
+  gallogState.set("priv0001", { posts: 5, comments: 9, visits: 180, postsVisible: false, guestbook: [] });
+  stored = {
+    settings: { galleryId: "g", checkTimes: ["09:30"], maxPerRun: 100,
+                maxChecksPerRun: 300, sweepPerRun: 0, autoApply: false, notify: false },
+    watchlist: [{ kind: "code", value: "priv0001", reason: "음란성", enabled: true, nextCheckAt: 0 }],
+    candidates: [], manual: [], imports: [], history: [], logs: [],
+    status: { text: "대기 중", busy: false, busySince: 0 },
+  };
+  await send({ type: "gallog", limit: 10, months: 0 });
+  const t = stored.watchlist.find((x) => x.value === "priv0001") || {};
+
+  eq("비공개로 기록한다", t.gallogPostsOpen, false);
+  ok("날짜는 모르는 채로 둔다", t.gallogPostAt === undefined);
+  ok("마지막 활동도 모른다", t.gallogLastAt === undefined);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

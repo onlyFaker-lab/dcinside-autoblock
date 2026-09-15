@@ -1078,6 +1078,19 @@ function gallogActivity(t) {
     : `${esc(nums)} <span class="${gallogQuiet(t) ? "bad" : "muted"}">${d}일째 그대로</span>`;
 
   const 덧 = [];
+
+  // 마지막 활동 날짜. 파딱이 3,740명을 손으로 판정할 때 실제로 본 값이다
+  // (2026-09-16 갱차 시트 대조). 숫자 변동보다 이쪽이 먼저 눈에 들어와야 한다.
+  // ⚠ 비공개는 '활동 없음'이 아니라 '못 봄'이다. 갈라서 적는다.
+  if (t.gallogLastAt) {
+    const 며칠 = daysSinceGallogDate(t.gallogLastAt);
+    const 오래 = 며칠 !== null && 며칠 >= 60;
+    덧.push(`마지막 활동 <span class="${오래 ? "bad" : ""}">${esc(t.gallogLastAt)}</span>` +
+            (며칠 === null ? "" : ` <span class="muted">(${며칠}일 전)</span>`));
+  } else if (t.gallogPostsOpen === false && t.gallogCommentsOpen === false) {
+    덧.push(`마지막 활동 <span class="muted">비공개라 모름</span>`);
+  }
+
   if (Number.isFinite(t.gallogVisits)) {
     // 총 방문자는 IP 단위로 하루 1씩 오른다. 확장이 본 횟수만큼은 우리가 올린 것이다.
     // 그걸 빼야 '남이 얼마나 왔나'가 된다.
@@ -1094,8 +1107,25 @@ function gallogActivity(t) {
     // 열려 있는데도 하나도 없다. 비활성 근거가 된다.
     덧.push(`방명록 <span class="bad">열려 있는데 없음</span>`);
   }
+  const 갈래 = [];
+  if (t.gallogPostAt) 갈래.push(`글 ${esc(t.gallogPostAt)}`);
+  else if (t.gallogPostsOpen === false) 갈래.push(`글 <span class="muted">비공개</span>`);
+  if (t.gallogCommentAt) 갈래.push(`댓 ${esc(t.gallogCommentAt)}`);
+  else if (t.gallogCommentsOpen === false) 갈래.push(`댓 <span class="muted">비공개</span>`);
+  if (갈래.length) 덧.push(갈래.join(" / "));
+
   if (!덧.length) return 본체;
   return `${본체}<br><span class="muted small">${덧.join(" · ")}</span>`;
+}
+
+// "2026.09.15" 가 며칠 전인지. 형식이 다르면 null 이다.
+// ⚠ 문자열끼리 비교하지 말 것. 날짜로 바꿔서 센다.
+function daysSinceGallogDate(s) {
+  const m = /^(\d{4})\.(\d{2})\.(\d{2})$/.exec(String(s || ""));
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
 }
 
 $("btnActivity").addEventListener("click", () => {

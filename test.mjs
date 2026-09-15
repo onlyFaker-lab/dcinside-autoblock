@@ -16,7 +16,7 @@ import {
   jitter, CHECK_DELAY_MS, GALLOG_DELAY_MS, GALLOG_FAIL_STREAK, rowHealth, carryOver,
   reasonFields, CUSTOM_REASON, REASON_TXT_MAX, pickGallogTargets, FETCH_SECS, mergeGallog, fetchRowsForCode,
   BUSY_TIMEOUT_MS, parseGallogVisits, parseGuestbookLatest, parseGallogCounts,
-  checkGuestbook, parseGuestbookPolicy,
+  checkGuestbook, parseGuestbookPolicy, parseGallogSections, checkGallog,
 } from "./dc.js";
 import { row, table, gallogPage } from "./fixtures.mjs";
 import { readFileSync } from "node:fs";
@@ -1256,7 +1256,7 @@ console.log("\n[로그인 풀림 감지]");
   // ⚠ 함정. 게시글이 공개면 게시글 목록에도 class="date" 가 나온다.
   // 구역을 안 나누고 통째로 긁으면 게시글 날짜를 방명록 날짜로 착각한다.
   eq("게시글 날짜를 방명록으로 착각하지 않는다",
-     parseGuestbookLatest(gallogPage({ publicPosts: true })), "2026.09.15");
+     parseGuestbookLatest(gallogPage({ postDates: ["2026.12.31"] })), "2026.09.15");
 
   // 글·댓글 읽기는 그대로 돌아야 한다.
   const c = parseGallogCounts(h);
@@ -1292,6 +1292,63 @@ console.log("\n[로그인 풀림 감지]");
   // 홈 화면에 문구가 있으면 거기서 바로 안다.
   eq("홈에 문구가 있으면 잠김", parseGuestbookPolicy(gallogPage({ guestClosedOnHome: true })), "closed");
   eq("홈에 문구가 없으면 모름", parseGuestbookPolicy(gallogPage()), null);
+}
+
+// ── [30] 갤로그 구역별 최신 날짜 ───────────────────────────
+// 2026-09-16 파딱 갱차 시트(3,740행)를 대조해보니, 파딱이 실제로 쓴 기준은
+// 글·댓글 '수'가 아니라 마지막 활동 '날짜'였다.
+//   O 판정 1,149명 중 1,012명 근거가 "방명록 8월 기록 있음"
+//   X 판정은 "최신글 2. 7." 처럼 몇 달 전 날짜
+// "마지막 활동이 확인 시점 한 달 이내면 활성" 한 줄로 2,024건 중 98.3%가 맞았다.
+// 날짜를 읽으면 숫자 변동을 비교할 필요가 없어서 첫 바퀴부터 판정이 나온다.
+{
+  console.log("\n[30] 갤로그 구역별 최신 날짜");
+
+  const s1 = parseGallogSections(gallogPage({
+    postDates: ["2026.09.15", "2026.09.04"],
+    commentDates: ["2026.09.15"],
+  }));
+  eq("게시글 최신 날짜", s1.posts.latest, "2026.09.15");
+  eq("댓글 최신 날짜", s1.comments.latest, "2026.09.15");
+  eq("방명록 최신 날짜", s1.guestbook.latest, "2026.09.15");
+
+  // ⚠ 여기가 이 기능의 핵심이다. 구역을 안 나누면 게시글 날짜가 방명록으로 샌다.
+  //    5개월 쉰 계정이 오늘 활동한 것으로 보인다.
+  const s2 = parseGallogSections(gallogPage({
+    postDates: ["2026.09.15"],
+    guestbook: ["2026.04.02"],
+  }));
+  eq("게시글 날짜가 방명록으로 새지 않는다", s2.guestbook.latest, "2026.04.02");
+  eq("그때 게시글은 제대로 읽는다", s2.posts.latest, "2026.09.15");
+
+  const s3 = parseGallogSections(gallogPage({
+    postDates: ["2026.01.01"], commentDates: ["2026.09.15"],
+  }));
+  eq("댓글 날짜가 게시글로 새지 않는다", s3.posts.latest, "2026.01.01");
+
+  // ⚠ "못 본 것"과 "활동이 없는 것"은 다르다. 비공개를 활동 없음으로 치면
+  //    비공개 계정이 통째로 비활성으로 몰린다. 원칙 2번.
+  const 비공개 = parseGallogSections(gallogPage({ postsVisible: false, postDates: ["2026.09.15"] }));
+  eq("비공개면 공개 여부가 false", 비공개.posts.visible, false);
+  eq("비공개면 날짜를 모른다", 비공개.posts.latest, null);
+
+  const 공개빈칸 = parseGallogSections(gallogPage({ postsVisible: true, postDates: [] }));
+  eq("공개인데 글이 없으면 공개 여부는 true", 공개빈칸.posts.visible, true);
+  eq("그때 날짜는 null", 공개빈칸.posts.latest, null);
+
+  // 방명록에는 배지가 없다. 없는 것을 false 로 떨어뜨리면 안 된다.
+  eq("방명록은 공개 여부를 모른다", s1.guestbook.visible, null);
+
+  ok("갤로그 홈이 아니면 null", parseGallogSections("<html>404 Page Not Found</html>") === null);
+
+  // checkGallog 가 실제로 실어 보내는지. 응답만 흉내내지 말고 그 경로를 돌린다.
+  globalThis.fetch = async () => ({
+    ok: true, status: 200, url: "https://gallog.dcinside.com/aaa1111",
+    text: async () => gallogPage({ postDates: ["2026.09.15"], guestbook: ["2026.04.02"] }),
+  });
+  const g = await checkGallog("aaa1111");
+  eq("checkGallog 가 구역 정보를 싣는다", g.sections.posts.latest, "2026.09.15");
+  eq("guestAt 도 같은 규칙에서 나온다", g.guestAt, "2026.04.02");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

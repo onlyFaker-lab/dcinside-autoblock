@@ -1,0 +1,133 @@
+<!--
+  2026-09-16 파딱이 보내준 실제 갤로그 홈 소스. 게시글·댓글이 **공개**인 계정이다.
+  gallog-sample.html 은 게시글이 비공개라 목록 마크업이 없었다. 그래서 따로 둔다.
+
+  여기서만 알 수 있는 것:
+   - 게시글 구역만 클래스가 그냥 "gallog_cont" 다 (나머지는 comments/scraps/gstbook)
+   - <span class="bluebox">공개</span> / <span class="greybox">비공개</span> 배지
+   - 게시글·댓글 목록에도 <span class="date"> 가 나온다 (방명록과 헷갈리는 자리)
+   - 항목마다 어느 갤에 썼는지가 <span class="gall_name"> 로 들어 있다
+   - data-no 가 게시글·댓글에 걸쳐 한 시퀀스다
+
+  길이를 줄이려고 목록 항목 수만 덜어냈고, 태그와 공백은 받은 그대로다.
+  디시가 마크업을 바꿨을 때 대조할 기준이라 지어낸 것으로 바꾸지 말 것.
+-->
+<div class="tright_box clear">
+  			<!-- 방문자수 영역 -->
+  			<div class="visitors_num rbox">
+  			  <span class="today_num">오늘의 방문자<em class="today_num">12/</em><em class="total_num ">461</em></span>  <!-- 210527 갤로그 개선 태그사이 여백x-->
+  			</div>
+		  </div>
+<!-- 게시글 -->
+<section>
+  <div class="gallog_cont">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/cactuslord/posting';" style="cursor:pointer">게시글<span class="num">(278)</span></h2>
+		<span class="bluebox">공개</span>
+	  </div>
+	</header>
+	<div class="cont_box">
+	  <ul class="cont_listbox">
+  <li class="" data-no="1234">
+	  <div class="cont"><div class="gall_linkbox">
+		  <a class="link " href="https://gall.dcinside.com/mgallery/board/view?id=t1win&no=1263625" target="_blank">
+			<div class="galltit"><strong>탑은 몰라도</strong><span class="comment_num">[12]</span></div>
+		    <div class="nameday "><span class="gall_name">티원 응원<em class="icon_minor">ⓜ</em></span>
+				<span class="date">2026.09.15</span>
+			</div>
+		  </a>
+	  </div></div>
+  </li>
+  <li class="" data-no="1229">
+	  <div class="cont"><div class="gall_linkbox">
+		  <a class="link " href="https://gall.dcinside.com/mgallery/board/view?id=bg3&no=942730" target="_blank">
+			<div class="galltit"><strong>여르기어</strong><span class="comment_num">[1]</span></div>
+		    <div class="nameday "><span class="gall_name">발더스 게이트 3<em class="icon_minor">ⓜ</em></span>
+				<span class="date">2026.09.04</span>
+			</div>
+		  </a>
+	  </div></div>
+  </li>
+</ul>
+	</div>
+  </div>
+</section>
+<!-- 댓글 -->
+<section>
+  <div class="gallog_cont comments">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/cactuslord/comment';" style="cursor:pointer">댓글<span class="num">(884)</span></h2>
+		<span class="bluebox">공개</span>
+	  </div>
+	</header>
+	<div class="cont_box">
+	  <ul class="cont_listbox">
+  <li class="replys" data-no="1235">
+	  <div class="cont"><div class="gall_linkbox">
+		  <a class="link " href="https://gall.dcinside.com/mgallery/board/view?id=t1win&no=1263625" target="_blank">
+			<p class="txt">그건 신규계약만 그런거고</p>
+		    <div class="nameday "><span class="gall_name">티원 응원<em class="icon_minor">ⓜ</em></span>
+				<span class="date">2026.09.15</span>
+			</div>
+			<div class="galltit"><strong>셀캡 개정으로</strong></div>
+		  </a>
+	  </div></div>
+  </li>
+</ul>
+	</div>
+  </div>
+</section>
+<!-- 스크랩 -->
+<section>
+  <div class="gallog_cont scraps">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/cactuslord/scrap';" style="cursor:pointer">스크랩<span class="num">(0)</span></h2>
+		<span class="greybox">비공개</span>
+	  </div>
+	</header>
+	<div class="cont_box">
+<div class="gallog_empty small">
+  스크랩에 글이 없습니다. 
+</div>
+	</div>
+  </div>
+</section>
+<!-- 방명록 -->
+<section>
+  <div class="gallog_cont gstbook">
+	<header>
+	  <div class="cont_head clear">
+		<h2 class="tit" onclick="location.href='/cactuslord/guestbook';" style="cursor:pointer">방명록<span class="num">(6)</span></h2>
+	  </div>
+	</header>
+	<div class="cont_box">
+	  <ul class="cont_listbox">
+		<li>
+		  <div class="cont"><div class="gall_linkbox"><div  class="link">
+				<div class="galltit"><strong>9월 중순 잘 보내고</strong></div>
+				<div class="nameday">
+				  <span class="writer_info">
+					  <em class='nickname in' title='김해송' >김해송</em>
+					  <span class="date">2026.09.15</span>
+				  </span>
+				</div>
+		  </div></div></div>
+		</li>
+		<li>
+		  <div class="cont"><div class="gall_linkbox"><div  class="link">
+				<div class="galltit"><strong>게이야 4월 잘보내라</strong></div>
+				<div class="nameday">
+				  <span class="writer_info">
+					  <em class='nickname in' title='복싱' >복싱</em>
+					  <span class="date">2026.04.02</span>
+				  </span>
+				</div>
+		  </div></div></div>
+		</li>
+	  </ul>
+	</div>
+  </div>
+</section>
