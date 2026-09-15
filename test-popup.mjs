@@ -699,5 +699,32 @@ console.log("\n[확인할 사람이 없으면 알림 없음]");
   ok("알림이 숨는다", els.get("dueBox").classList.contains("hidden"));
 }
 
+// ── 작업 기록에 날짜가 보인다 ──────────────────────────────
+// 시각만 찍으면 며칠치 기록이 한 화면에 이어 붙어 몇 시간 차이인지 알 수 없다.
+// 2026-09-15 파딱 갤에서 하루 차이(23시간)를 25분으로 잘못 읽었다. 기록을 근거로
+// 판단하는 도구인데 기록이 날짜를 안 알려주면 그 판단이 통째로 흔들린다.
+console.log("\n[작업 기록 날짜 표시]");
+{
+  const d1 = new Date("2026-09-14T00:27:24").getTime();
+  const d2 = new Date("2026-09-15T00:02:06").getTime();
+  await seed({
+    logs: [
+      { time: d1, message: "재차단 실행: 사유 '벌레' 37건" },
+      { time: d1 + 2000, message: "35건 확인됨" },
+      { time: d2, message: "명단 4782명 중 112명을 조회합니다" },
+    ],
+  });
+
+  const txt = els.get("logs").textContent;
+  ok("첫날 날짜가 보인다", /2026\.09\.14/.test(txt), txt);
+  ok("날이 바뀌면 다시 보인다", /2026\.09\.15/.test(txt), txt);
+  ok("요일도 보인다", /\((일|월|화|수|목|금|토)\)/.test(txt), txt);
+  ok("시각은 그대로 남는다", /\[00:02:06\]/.test(txt), txt);
+
+  // 같은 날 줄마다 날짜를 반복하지 않는다. 길어지기만 한다.
+  const 날짜줄 = (txt.match(/2026\.09\.14/g) || []).length;
+  ok("같은 날은 한 번만 찍는다", 날짜줄 === 1, `${날짜줄}번`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

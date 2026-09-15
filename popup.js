@@ -145,10 +145,32 @@ function render() {
     </tr>`).join("");
 
   // 기록
-  $("logs").textContent = state.logs
-    .slice(-80)
-    .map((l) => `[${new Date(l.time).toTimeString().slice(0, 8)}] ${l.message}`)
-    .join("\n");
+  //
+  // ⚠ 날짜를 반드시 보여줄 것. 시각만 찍으면 며칠에 걸친 기록이 한 화면에
+  // 이어 붙어서 몇 시간 차이인지 알 수가 없다.
+  //
+  // 2026-09-15 파딱 갤: [00:02:06] 줄과 '2026.09.14 00:27 처리' 가 같이 있어서
+  // 25분 미래의 일을 미리 본 것처럼 보였다. 실제로는 하루 차이(23시간)였다.
+  // 파딱도 나도 같은 곳에서 잘못 읽었다. 기록을 근거로 판단하는 도구인데
+  // 기록이 날짜를 안 알려주면 그 판단이 통째로 흔들린다.
+  //
+  // 줄마다 날짜를 붙이면 길어지므로 날이 바뀌는 자리에만 구분선을 넣는다.
+  {
+    const lines = [];
+    let day = "";
+    for (const l of state.logs.slice(-80)) {
+      const d = new Date(l.time);
+      const p2 = (n) => String(n).padStart(2, "0");
+      const key = `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())}`;
+      if (key !== day) {
+        day = key;
+        const 요일 = ["일", "월", "화", "수", "목", "금", "토"][d.getDay()];
+        lines.push(`──────── ${key} (${요일}) ────────`);
+      }
+      lines.push(`[${d.toTimeString().slice(0, 8)}] ${l.message}`);
+    }
+    $("logs").textContent = lines.join("\n");
+  }
   $("logs").scrollTop = $("logs").scrollHeight;
 
   // 명단 — 수만 명이 될 수 있으므로 검색 + 표시 상한을 둔다
