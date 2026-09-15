@@ -85,14 +85,53 @@ function nextCheckText() {
   return `다음 확인까지 ${h}시간 ${m}분`;
 }
 
+// 명단에서 지금 화면에 보이는 사람. 그리기와 일괄 삭제가 같은 규칙을 써야 한다.
+// 옮겨 적으면 규칙이 두 벌이 되고, 한쪽만 고쳤을 때 엉뚱한 사람이 지워진다.
+// 중지는 손으로도 걸지만 대부분 60일 자동 중지로 붙는다. 명단에서 뺄지
+// 판단하려면 그 사람들만 모아볼 수 있어야 한다(파딱 요청 2026-09-09).
+function listRows() {
+  const q = ($("listSearch").value || "").trim().toLowerCase();
+  const only = $("listFilter").value;
+  return state.watchlist
+    .map((t, i) => ({ t, i }))
+    .filter(({ t }) => {
+      if (only === "on" && t.enabled === false) return false;
+      if (only === "off" && t.enabled !== false) return false;
+      // 사유로도 찾을 수 있어야 한다. 직접 입력 사유를 쓰면 사유가 곧 분류다.
+      return !q ||
+        t.value.toLowerCase().includes(q) ||
+        (t.memo || "").toLowerCase().includes(q) ||
+        (t.reason || "").toLowerCase().includes(q);
+    });
+}
+
 function render() {
   renderQuickScan();
   $("statusText").textContent = state.status.text;
   $("nextCheck").textContent = nextCheckText();
   const busy = isBusy(state.status);
-  $("btnCheck").disabled = busy;
-  $("btnCheckNow").disabled = busy;
+
+  // ⚠ 작업이 도는 중에 다른 버튼을 누르면 뒤에 누른 쪽은 조용히 거절된다.
+  //    파딱이 '지금 확인'과 '밀린 31일 차단'을 같이 눌러두고 둘 다 되는 줄
+  //    알았다(2026-09-17). 누른 것처럼 보이는데 아무 일도 안 하는 게 제일 나쁘다.
+  //    그래서 아예 못 누르게 하고, 왜 못 누르는지 버튼에 적어준다.
+  //
+  // ⚠ 요청이 나가는 버튼은 전부 여기 있어야 한다. 새 버튼을 넣으면 같이 넣을 것.
+  const 잠글버튼 = ["btnCheck", "btnCheckNow", "btnQuickScan", "btnScan",
+                    "btnRecheck", "btnActivity", "btnGallog"];
+  for (const id of 잠글버튼) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.disabled = busy;
+    el.title = busy ? "다른 작업이 도는 중입니다. 끝나면 눌러주세요." : "";
+  }
   $("btnApply").disabled = busy || state.candidates.length === 0;
+
+  // 몇 분째 도는지. 남은 시간은 알 수 없다 — 지어내지 않는다.
+  const 분 = busy
+    ? Math.floor((Date.now() - (state.status.busySince || Date.now())) / 60000)
+    : 0;
+  $("statusText").title = busy ? `${분}분째 진행 중` : "";
 
   // 후보
   const cb = $("candBody");
@@ -175,20 +214,8 @@ function render() {
 
   // 명단 — 수만 명이 될 수 있으므로 검색 + 표시 상한을 둔다
   const q = ($("listSearch").value || "").trim().toLowerCase();
-  // 중지는 손으로도 걸지만 대부분 60일 자동 중지로 붙는다. 명단에서 뺄지
-  // 판단하려면 그 사람들만 모아볼 수 있어야 한다(파딱 요청 2026-09-09).
   const only = $("listFilter").value;
-  const rowsAll = state.watchlist
-    .map((t, i) => ({ t, i }))
-    .filter(({ t }) => {
-      if (only === "on" && t.enabled === false) return false;
-      if (only === "off" && t.enabled !== false) return false;
-      // 사유로도 찾을 수 있어야 한다. 직접 입력 사유를 쓰면 사유가 곧 분류다.
-      return !q ||
-        t.value.toLowerCase().includes(q) ||
-        (t.memo || "").toLowerCase().includes(q) ||
-        (t.reason || "").toLowerCase().includes(q);
-    });
+  const rowsAll = listRows();
   const LIST_LIMIT = 200;
   const shown = rowsAll.slice(0, LIST_LIMIT);
 
@@ -224,6 +251,11 @@ function render() {
       </td>
     </tr>`).join("");
   $("listEmpty").classList.toggle("hidden", state.watchlist.length > 0);
+
+  // ⚠ 한 번 누르면 이 인원만 보고 끝난다. 파딱이 '여러 번 자동으로 돈다'고
+  //    이해했다(2026-09-17). 버튼 이름에 숫자를 박아두면 오해가 줄어든다.
+  const 인원 = Number($("cleanLimit").value) || 0;
+  $("btnGallog").textContent = 인원 ? `갤로그 ${인원}명 점검` : "갤로그 점검";
 
   // 명단 채우기
   // ── 명단 정리 탭 ──
@@ -1404,6 +1436,28 @@ $("btnQuickScan").addEventListener("click", () => {
   // 결과는 채우기 화면에 쌓이므로 미리 그쪽으로 옮겨둔다.
   document.querySelector('.tab[data-tab="mgmt"]').click();
   document.querySelector('.seg[data-seg="scan"]').click();
+});
+
+$("cleanLimit").addEventListener("input", render);
+
+// 보이는 사람 일괄 삭제.
+// ⚠ 되돌릴 수 없다. 몇 명인지 숫자를 보여주고 완장이 직접 확인하게 한다.
+//    3,734명을 잘못 붙여넣고 되돌릴 길이 없어 콘솔을 만져야 했다(2026-09-17).
+$("btnDelFiltered").addEventListener("click", async () => {
+  const rows = listRows();
+  if (!rows.length) return;
+  const 전부 = rows.length === state.watchlist.length;
+  const ok = confirm(
+    `지금 화면에 보이는 ${rows.length}명을 명단에서 지웁니다.\n` +
+    (전부 ? "명단 전체입니다.\n" : "") +
+    `\n되돌릴 수 없습니다. 필요하면 먼저 '명단 내보내기'로 저장하세요.\n\n지울까요?`
+  );
+  if (!ok) return;
+  const 지울 = new Set(rows.map(({ i }) => i));
+  state.watchlist = state.watchlist.filter((_, i) => !지울.has(i));
+  editingRow = -1;
+  await chrome.storage.local.set({ watchlist: state.watchlist });
+  render();
 });
 
 $("listSearch").addEventListener("input", () => { editingRow = -1; render(); });

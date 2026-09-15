@@ -886,5 +886,88 @@ console.log("\n[빼기 탭 정렬·필터]");
   ok("방문자가 상한을 넘으면 뺀다", !행.includes("ddd4444"), 행.join(","));
 }
 
+// ── 작업 중에는 요청 나가는 버튼이 전부 잠긴다 ─────────────
+// 2026-09-17 파딱: '지금 확인'과 '밀린 31일 차단'을 같이 눌러두고 둘 다 되는 줄
+// 알았다. 실제로는 뒤에 누른 쪽이 조용히 거절된다. 누른 것처럼 보이는데 아무
+// 일도 안 하는 게 제일 나쁘다. 아예 못 누르게 한다.
+console.log("\n[작업 중 버튼 잠금]");
+{
+  const 요청버튼 = ["btnCheck", "btnCheckNow", "btnQuickScan", "btnScan",
+                    "btnRecheck", "btnActivity", "btnGallog"];
+
+  await seed({ watchlist: [], status: { text: "대기 중", busy: false, busySince: 0 } });
+  ok("놀고 있으면 다 눌린다", 요청버튼.every((id) => els.get(id).disabled === false));
+
+  await seed({
+    watchlist: [],
+    status: { text: "갤로그 점검 중", busy: true, busySince: Date.now() - 60000 },
+  });
+  for (const id of 요청버튼) {
+    ok(`작업 중이면 ${id} 잠김`, els.get(id).disabled === true);
+  }
+  ok("왜 못 누르는지 적어준다", /다른 작업/.test(els.get("btnCheck").title || ""),
+     els.get("btnCheck").title);
+}
+
+// ── 갤로그 버튼에 인원이 박힌다 ─────────────────────────────
+// 한 번 누르면 이 인원만 보고 끝난다. 여러 번 자동으로 도는 게 아니다.
+console.log("\n[갤로그 버튼에 인원 표시]");
+{
+  await seed({ watchlist: [], status: { text: "대기 중", busy: false, busySince: 0 } });
+  els.get("cleanLimit").value = "300";
+  els.get("cleanLimit").dispatchEvent({ type: "input" });
+  ok("300명이면 그렇게 적는다", /300명/.test(els.get("btnGallog").textContent),
+     els.get("btnGallog").textContent);
+
+  els.get("cleanLimit").value = "50";
+  els.get("cleanLimit").dispatchEvent({ type: "input" });
+  ok("바꾸면 따라 바뀐다", /50명/.test(els.get("btnGallog").textContent),
+     els.get("btnGallog").textContent);
+}
+
+// ── 보이는 사람 일괄 삭제 ───────────────────────────────────
+// 2026-09-17: 3,734명을 잘못 붙여넣고 되돌릴 길이 화면에 없어 콘솔을 만져야 했다.
+// ⚠ 되돌릴 수 없는 동작이다. 몇 명인지 보여주고 직접 확인하게 한다(원칙 3번).
+console.log("\n[명단 일괄 삭제]");
+{
+  const 명단 = [
+    { kind: "code", value: "keep0001", reason: "음란성", enabled: true },
+    { kind: "code", value: "junk0001", reason: "광고", enabled: true },
+    { kind: "code", value: "junk0002", reason: "광고", enabled: true },
+    { kind: "code", value: "junk0003", reason: "광고", enabled: true },
+  ];
+  await seed({ watchlist: 명단, status: { text: "대기 중", busy: false, busySince: 0 } });
+
+  // 사유로 걸러서 그 사람들만 지운다.
+  els.get("listSearch").value = "광고";
+  els.get("listSearch").dispatchEvent({ type: "input" });
+  confirmAnswer = true;
+  els.get("btnDelFiltered").click();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const 남은 = (stored.watchlist || []).map((t) => t.value);
+  ok("걸러진 사람만 지운다", 남은.length === 1 && 남은[0] === "keep0001", 남은.join(","));
+  ok("몇 명인지 묻는다", /3명/.test(confirmTexts.at(-1) || ""), confirmTexts.at(-1));
+  ok("되돌릴 수 없다고 알린다", /되돌릴 수 없/.test(confirmTexts.at(-1) || ""));
+
+  // 아니라고 하면 아무것도 안 지운다.
+  await seed({ watchlist: 명단, status: { text: "대기 중", busy: false, busySince: 0 } });
+  els.get("listSearch").value = "광고";
+  els.get("listSearch").dispatchEvent({ type: "input" });
+  confirmAnswer = false;
+  els.get("btnDelFiltered").click();
+  await new Promise((r) => setTimeout(r, 0));
+  ok("취소하면 그대로", (stored.watchlist || []).length === 4);
+
+  // 명단 전체가 보이는 상태면 그렇다고 말해준다.
+  await seed({ watchlist: 명단, status: { text: "대기 중", busy: false, busySince: 0 } });
+  els.get("listSearch").value = "";
+  els.get("listSearch").dispatchEvent({ type: "input" });
+  confirmAnswer = false;
+  els.get("btnDelFiltered").click();
+  await new Promise((r) => setTimeout(r, 0));
+  ok("전체면 전체라고 말한다", /명단 전체/.test(confirmTexts.at(-1) || ""), confirmTexts.at(-1));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
