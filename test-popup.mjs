@@ -828,5 +828,63 @@ console.log("\n[빼기 탭 마지막 활동 날짜]");
   ok("모르면 아무 말도 안 한다", !/마지막 활동/.test(html), html);
 }
 
+// ── 빼기 탭 정렬과 방문자 필터 ──────────────────────────────
+// v1.7.16. 기준을 우리가 정해 박아넣는 대신, 완장이 막대를 움직이며
+// 몇 명이 걸리는지 눈으로 보게 한다. 파딱 명단이 4,700명이라 이게 없으면
+// 후보를 눈으로 훑어야 한다.
+console.log("\n[빼기 탭 정렬·필터]");
+{
+  const 날 = (d) => {
+    const x = new Date(Date.now() - d * 24 * 3600 * 1000);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${x.getFullYear()}.${p2(x.getMonth() + 1)}.${p2(x.getDate())}`;
+  };
+  const 사람 = (v, 방문, 며칠) => ({
+    kind: "code", value: v, reason: "음란성", enabled: true,
+    gallogVisits: 방문, gallogLastAt: 날(며칠), gallogPostsOpen: true,
+  });
+
+  await seed({ watchlist: [
+    사람("aaa1111", 800, 400),   // 방문 많고 아주 오래됨
+    사람("bbb2222", 20, 100),    // 방문 적고 오래됨
+    사람("ccc3333", 60, 95),     // 중간
+  ] });
+
+  // ⚠ v1.7.15 전에는 글·댓글 수를 두 번 봐야 후보가 됐다. 날짜만으로도 올라와야 한다.
+  const 코드들 = () =>
+    [...new Set([...els.get("cleanBody").innerHTML.matchAll(/([a-z]{3}\d{4})/g)].map((m) => m[1]))];
+  let 행 = 코드들();
+  ok("날짜만으로도 후보가 된다", 행.length === 3, 행.join(","));
+
+  els.get("cleanSort").value = "visits";
+  els.get("cleanSort").dispatchEvent({ type: "change" });
+  행 = 코드들();
+  ok("방문자 적은 순", 행[0] === "bbb2222", 행.join(","));
+
+  els.get("cleanSort").value = "last";
+  els.get("cleanSort").dispatchEvent({ type: "change" });
+  행 = 코드들();
+  ok("마지막 활동 오래된 순", 행[0] === "aaa1111", 행.join(","));
+
+  els.get("cleanMaxVisits").value = "100";
+  els.get("cleanMaxVisits").dispatchEvent({ type: "input" });
+  행 = 코드들();
+  ok("방문자 상한이 걸린다", 행.length === 2, 행.join(","));
+  ok("몇 명이 걸리는지 보여준다",
+     /후보 3명 중 <b>2<\/b>명/.test(els.get("cleanFilterNote").innerHTML),
+     els.get("cleanFilterNote").innerHTML);
+
+  // ⚠ 방문자를 모르는 사람을 걸러내면 안 된다. 모르는 것은 적은 것이 아니다.
+  await seed({ watchlist: [
+    사람("ddd4444", 500, 200),
+    { kind: "code", value: "eee5555", reason: "음란성", enabled: true, gallogLastAt: 날(200) },
+  ] });
+  els.get("cleanMaxVisits").value = "50";
+  els.get("cleanMaxVisits").dispatchEvent({ type: "input" });
+  행 = 코드들();
+  ok("방문자를 모르면 남겨둔다", 행.includes("eee5555"), 행.join(","));
+  ok("방문자가 상한을 넘으면 뺀다", !행.includes("ddd4444"), 행.join(","));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

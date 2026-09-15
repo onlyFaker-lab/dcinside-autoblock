@@ -257,6 +257,24 @@
           IP를 막습니다(2026-09-08 실제 발생). 한 명당 1초 남짓 잡으세요.
           오래된 사람부터 도니 며칠에 나눠 눌러도 결국 다 돕니다.
         </p>
+        <details class="muted small">
+          <summary>누르면 어떤 순서로 도는지</summary>
+          <ol class="steps">
+            <li>오래 안 본 사람부터 순서대로 위에 적은 인원만 고릅니다.
+                최근에 본 사람은 건너뜁니다.</li>
+            <li>한 명당 갤로그 홈을 <b>딱 한 번</b> 엽니다.</li>
+            <li>그 한 화면에서 전부 읽습니다 — 탈퇴 여부, 디시 전체 글·댓글 수,
+                방문자 수, 게시글·댓글·방명록 각각의 최신 날짜,
+                게시글이 공개인지 비공개인지.</li>
+            <li>1.2초 쉬고 다음 사람.</li>
+            <li>아래 목록에 쌓아서 보여줍니다.
+                <b>아무도 자동으로 지우지 않습니다.</b></li>
+          </ol>
+          <p>
+            300명이면 6~7분, 요청은 300번입니다. 읽는 항목이 늘어도
+            요청 수는 그대로입니다 — 전부 같은 화면 안에 있습니다.
+          </p>
+        </details>
       </div>
 
       <div class="findbox">
@@ -270,6 +288,28 @@
           <span class="muted small">위에서 고른 기간 동안 이 갤에 글 없는 사람 찾기</span>
         </div>
       </div>
+
+      <div class="addrow">
+        <label class="inline muted small">
+          정렬
+          <select id="cleanSort">
+            <option value="rank" selected>근거가 센 순</option>
+            <option value="last">마지막 활동 오래된 순</option>
+            <option value="visits">방문자 적은 순</option>
+          </select>
+        </label>
+        <label class="inline muted small">
+          방문자
+          <input id="cleanMaxVisits" type="range" min="0" max="1000" step="10" value="0" style="width:140px">
+          이하만
+        </label>
+        <span id="cleanFilterNote" class="muted small"></span>
+      </div>
+      <p class="muted small">
+        방문자 막대를 움직이면 몇 명이 걸리는지 바로 보입니다.
+        <b>어디서 자를지 정하는 데 쓰세요.</b> 걸러진 사람이 지워지는 것은 아닙니다.
+        방문자를 아직 모르는 사람은 걸러내지 않습니다 — 모르는 것과 적은 것은 다릅니다.
+      </p>
 
       <table>
         <thead>

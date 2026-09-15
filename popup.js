@@ -242,6 +242,16 @@ function render() {
       <td>${gallogLabel(t)}</td>
       <td class="muted">${gallogActivity(t)}</td>
     </tr>`).join("");
+  // 슬라이더를 움직이면 몇 명이 걸리는지 바로 보여준다.
+  const 전체후보 = cleanCandidates().length;
+  const cap = visitCap();
+  const 안내 = $("cleanFilterNote");
+  if (안내) {
+    안내.innerHTML = !cap
+      ? `후보 <b>${전체후보}</b>명 전부 보는 중`
+      : `방문자 <b>${cap}</b> 이하 — 후보 ${전체후보}명 중 <b>${clean.length}</b>명`;
+  }
+
   $("cleanEmpty").textContent = state.watchlist.length === 0
     ? "명단이 비어 있습니다."
     : "지울 만한 사람을 찾지 못했습니다. 위에서 점검을 돌려보세요.";
@@ -1036,20 +1046,65 @@ function gallogQuiet(t) {
   return d !== null && d >= quietCutDays();
 }
 
-function cleanRows() {
+// 마지막 활동이 며칠 전인지. v1.7.15부터 쌓인다.
+// 글·댓글 '수'는 두 번 봐야 변동을 알지만 날짜는 한 번만 봐도 안다.
+// 4,700명을 300명씩 돌면 한 바퀴가 16회다. 숫자 변동만 쓰면 판정이 한 달 뒤에
+// 나오고, 날짜를 쓰면 첫 바퀴에 나온다. 그 차이 때문에 넣었다.
+function gallogLastDays(t) {
+  return daysSinceGallogDate(t.gallogLastAt);
+}
+function gallogStale(t) {
+  const d = gallogLastDays(t);
+  return d !== null && d >= quietCutDays();
+}
+
+// 방문자 상한 필터. 0이면 제한 없음.
+// ⚠ 완장이 직접 움직여서 몇 명이 걸리는지 눈으로 보는 값이다.
+//    기준을 우리가 정해서 박아넣는 자리가 아니다.
+function visitCap() {
+  const el = document.getElementById("cleanMaxVisits");
+  return Number(el && el.value) || 0;
+}
+function underCap(t) {
+  const cap = visitCap();
+  if (!cap) return true;
+  // ⚠ 방문자를 모르는 사람을 걸러내면 안 된다. 모르는 것은 작은 것이 아니다.
+  if (!Number.isFinite(t.gallogVisits)) return true;
+  return t.gallogVisits <= cap;
+}
+
+// 후보로 올릴 사람. 근거가 하나라도 있으면 올린다.
+function cleanCandidates() {
   return state.watchlist
     .map((t, i) => ({ t, i }))
     .filter(({ t }) =>
       t.kind === "code" &&
       (t.gallogState === "deleted" || t.gallogState === "notfound" ||
-       gallogQuiet(t) || t.noPostSince)
-    )
-    .sort((a, b) => rank(a.t) - rank(b.t));
+       gallogQuiet(t) || gallogStale(t) || t.noPostSince)
+    );
 }
+
+function cleanRows() {
+  const rows = cleanCandidates().filter(({ t }) => underCap(t));
+  const how = (document.getElementById("cleanSort") || {}).value || "rank";
+  if (how === "last") {
+    // 마지막 활동이 오래된 순. 모르는 사람은 뒤로 보낸다 — 앞에 두면
+    // 근거 없는 사람이 맨 위에 쌓여서 지우기 쉬워진다.
+    return rows.sort((a, b) =>
+      (gallogLastDays(b.t) ?? -1) - (gallogLastDays(a.t) ?? -1));
+  }
+  if (how === "visits") {
+    const v = (t) => (Number.isFinite(t.gallogVisits) ? t.gallogVisits : Infinity);
+    return rows.sort((a, b) => v(a.t) - v(b.t));
+  }
+  return rows.sort((a, b) => rank(a.t) - rank(b.t));
+}
+
 function rank(t) {
   if (t.gallogState === "deleted") return 0;
   if (t.gallogState === "notfound") return 1;
   if (gallogQuiet(t)) return 2;      // 디시 전체에서 글·댓글이 안 늘었다
+  if (gallogStale(t)) return 2;      // 마지막 활동이 오래됐다. 같은 무게로 본다
   return 3;                          // 이 갤에 글이 없을 뿐. 가장 약한 근거
 }
 function gallogLabel(t) {
@@ -1188,6 +1243,10 @@ $("btnCleanNone").addEventListener("click", () => setAllClean(false));
 // 표 머리글의 전체선택. 넣어만 두고 동작을 안 붙여서, 눌러도 아무 일이
 // 없는 채로 나가 있었다. 표가 길면 아래 버튼까지 내려가기 번거롭다.
 $("cleanAll").addEventListener("change", (e) => setAllClean(e.target.checked));
+
+// 정렬·필터는 화면만 바꾼다. 디시에 요청하지 않는다.
+$("cleanSort").addEventListener("change", render);
+$("cleanMaxVisits").addEventListener("input", render);
 
 $("btnCleanDel").addEventListener("click", async () => {
   const picked = [...document.querySelectorAll(".cleanchk")]
